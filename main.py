@@ -44,7 +44,7 @@ def main():
 
     # 设置应用信息
     app.setApplicationName("FileSearch")
-    app.setApplicationVersion("2.3.0")
+    app.setApplicationVersion("2.3.1")
     app.setOrganizationName("FileSearch")
 
     # 设置明亮暖白主题样式

@@ -473,22 +473,30 @@ class IndexDialog(QWidget):
             return
 
         self._refresh_index_list()
+
+        # 设置抽屉高度与父窗口一致
+        self.setFixedHeight(parent.height())
+
+        # 显示遮罩层
+        if hasattr(parent, '_drawer_overlay') and parent._drawer_overlay:
+            parent._drawer_overlay.setGeometry(parent.rect())
+            parent._drawer_overlay.show()
+            parent._drawer_overlay.raise_()
+
         self.show()
         self.raise_()
 
         # 计算目标位置：紧贴父窗口右侧内边
         target_x = parent.width() - self.width()
+
+        # 初始位置：父窗口右侧外
         self.move(parent.width(), 0)
 
         # 滑入动画
+        from PyQt5.QtCore import QPoint
         self._anim = QPropertyAnimation(self, b"pos")
         self._anim.setDuration(250)
-        self._anim.setStartValue(self.pos())
-        self._anim.setEndValue(self.parent().mapFromGlobal(
-            self.mapToGlobal(self.pos())
-        ))
-        # 直接用父窗口本地坐标
-        from PyQt5.QtCore import QPoint
+        self._anim.setStartValue(QPoint(parent.width(), 0))
         self._anim.setEndValue(QPoint(target_x, 0))
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.start()
@@ -502,15 +510,23 @@ class IndexDialog(QWidget):
             self.hide()
             return
 
+        # 隐藏遮罩层
+        if hasattr(parent, '_drawer_overlay') and parent._drawer_overlay:
+            parent._drawer_overlay.hide()
+
         from PyQt5.QtCore import QPoint
         self._anim = QPropertyAnimation(self, b"pos")
         self._anim.setDuration(250)
         self._anim.setStartValue(self.pos())
         self._anim.setEndValue(QPoint(parent.width(), 0))
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.finished.connect(self.hide)
+        self._anim.finished.connect(self._on_hide_finished)
         self._anim.start()
         self._is_open = False
+
+    def _on_hide_finished(self):
+        """动画结束后隐藏widget"""
+        self.hide()
 
     def exec_(self):
         """兼容 QDialog.exec_ 的调用方式"""

@@ -349,6 +349,15 @@ class MainWindow(QMainWindow):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._do_search)
 
+        # 抽屉遮罩层（点击关闭抽屉）
+        self._drawer_overlay = QWidget(self)
+        self._drawer_overlay.setStyleSheet("background-color: rgba(28,25,23,90);")
+        self._drawer_overlay.hide()
+        self._drawer_overlay.lower()
+        # 让鼠标事件穿透遮罩到抽屉
+        self._drawer_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self._drawer_overlay.mousePressEvent = self._on_overlay_click
+
     def _build_topbar(self):
         """构建顶部工具栏"""
         topbar = QFrame()
@@ -990,6 +999,27 @@ class MainWindow(QMainWindow):
         # 找到 filter row 中 source chips 所在的 layout
         # 简单处理：在需要时重建
         pass
+
+    def _on_overlay_click(self, event):
+        """点击遮罩关闭抽屉"""
+        if hasattr(self, '_index_drawer') and self._index_drawer._is_open:
+            self._index_drawer.hide_drawer()
+        if event is not None:
+            event.accept()
+
+    def resizeEvent(self, event):
+        """窗口大小改变时调整抽屉和遮罩"""
+        super().resizeEvent(event)
+        # 调整遮罩大小
+        if hasattr(self, '_drawer_overlay'):
+            self._drawer_overlay.setGeometry(self.centralWidget().rect())
+        # 调整抽屉高度和位置
+        if hasattr(self, '_index_drawer') and self._index_drawer.isVisible():
+            self._index_drawer.setFixedHeight(self.height())
+            if self._index_drawer._is_open:
+                target_x = self.width() - self._index_drawer.width()
+                from PyQt5.QtCore import QPoint
+                self._index_drawer.move(target_x, 0)
 
     # ---- 系统托盘 ----
 
