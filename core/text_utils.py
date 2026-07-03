@@ -1,21 +1,54 @@
-"""文本工具模块 - 编码检测、中文分词、文本清洗"""
+"""文本工具模块 - 编码检测、中文分词、文本清洗（性能优化版）
+- chardet 只读前 8KB
+- jieba 分词用于索引和搜索
+"""
 import re
-import chardet
+import os
+
+# jieba 延迟加载
+_jieba = None
+_jieba_loaded = False
 
 
-def detect_encoding(raw_bytes):
-    """检测字节流的编码"""
-    result = chardet.detect(raw_bytes)
-    encoding = result.get("encoding", "utf-8")
-    if encoding is None:
-        encoding = "utf-8"
-    return encoding.lower()
+def get_jieba():
+    """获取jieba分词器（延迟加载）"""
+    global _jieba, _jieba_loaded
+    if not _jieba_loaded:
+        import jieba
+        # 减少 jieba 日志输出
+        jieba.setLogLevel(20)
+        _jieba = jieba
+        _jieba_loaded = True
+    return _jieba
+
+
+def detect_encoding(file_path, sample_size=8192):
+    """检测文件的编码（只读前 8KB，大幅减少 I/O）"""
+    import chardet
+    try:
+        with open(file_path, 'rb') as f:
+            raw = f.read(sample_size)
+        if not raw:
+            return 'utf-8'
+        result = chardet.detect(raw)
+        encoding = result.get("encoding", "utf-8")
+        if encoding is None:
+            encoding = "utf-8"
+        return encoding.lower()
+    except (OSError, IOError):
+        return 'utf-8'
 
 
 def decode_bytes(raw_bytes, encoding=None):
     """将字节流解码为字符串，自动检测编码"""
     if encoding is None:
-        encoding = detect_encoding(raw_bytes)
+        import chardet
+        # 只取前 8KB 检测编码
+        sample = raw_bytes[:8192] if len(raw_bytes) > 8192 else raw_bytes
+        result = chardet.detect(sample)
+        encoding = result.get("encoding", "utf-8")
+        if encoding is None:
+            encoding = "utf-8"
 
     # 常见中文编码映射
     encoding_map = {
@@ -50,40 +83,28 @@ def clean_text(text):
     return text.strip()
 
 
-# jieba 延迟加载
-_jieba = None
-_jieba_loaded = False
-
-
-def get_jieba():
-    """获取jieba分词器（延迟加载）"""
-    global _jieba, _jieba_loaded
-    if not _jieba_loaded:
-        import jieba
-        _jieba = jieba
-        _jieba_loaded = True
-    return _jieba
-
-
-def tokenize_chinese(text):
-    """使用jieba对中文文本进行分词，返回空格分隔的分词结果"""
+def tokenize_content(text):
+    """对文件内容进行分词（用于FTS5索引）
+    - 中文用 jieba 分词
+    - 英文保留原词
+    - 返回空格分隔的 token 字符串
+    """
     if not text:
         return ""
     jieba = get_jieba()
-    # 分词
     words = jieba.cut_for_search(text)
-    # 过滤掉单字符和空白
-    tokens = [w.strip() for w in words if w.strip() and len(w.strip()) > 1]
+    # 过滤空白，保留长度 >= 1 的词
+    tokens = [w.strip() for w in words if w.strip()]
     return " ".join(tokens)
 
 
 def tokenize_filename(text):
-    """对文件名进行分词（更细粒度）"""
+    """对文件名进行分词"""
     if not text:
         return ""
     jieba = get_jieba()
     words = jieba.cut(text, HMM=False)
-    tokens = [w.strip() for w in words if w.strip() and len(w.strip()) > 0]
+    tokens = [w.strip() for w in words if w.strip()]
     return " ".join(tokens)
 
 
@@ -93,37 +114,53 @@ def prepare_search_query(query):
     - is_fuzzy: 是否包含通配符
     - processed_query: 处理后的查询字符串
 
-    注意：FTS5使用unicode61分词器，中文按字符切分
-    所以查询词也需要按字符切分来匹配
+    中文搜索用 jieba 分词 + FTS5 OR 匹配
     """
     query = query.strip()
+    if not query:
+        return False, ""
 
     # 检查是否包含通配符
     has_wildcard = "*" in query or "?" in query
-
     if has_wildcard:
         return True, query
 
     # 检查是否是引号包裹的精确搜索
     if query.startswith('"') and query.endswith('"'):
-        inner = query[1:-1]
-        # 精确短语搜索 - 用NEAR连接字符
-        chars = list(inner.replace(" ", ""))
-        if chars:
-            return False, " NEAR ".join(chars)
+        inner = query[1:-1].strip()
+        if not inner:
+            return False, ""
+        # 精确短语搜索 - 用 NEAR 连接每个 token
+        jieba = get_jieba()
+        words = [w.strip() for w in jieba.cut(inner) if w.strip()]
+        if words:
+            return False, " NEAR ".join(words)
         return False, f'"{inner}"'
 
-    # 普通搜索 - 按字符切分（匹配unicode61分词）
-    # 移除空格，将中文查询词拆成单字符
-    clean_query = query.replace(" ", "")
-    if clean_query:
-        # 将每个字符用AND连接，确保所有字符都匹配
-        chars = list(clean_query)
-        if len(chars) > 1:
-            return False, " AND ".join(chars)
-        return False, clean_query
+    # 普通搜索 - 用 jieba 分词
+    jieba = get_jieba()
+    # 按空格分割用户输入的多关键词
+    parts = query.split()
+    all_tokens = []
+    for part in parts:
+        words = [w.strip() for w in jieba.cut(part) if w.strip()]
+        all_tokens.extend(words)
 
-    return False, query
+    if not all_tokens:
+        return False, ""
+
+    # 去重
+    seen = set()
+    unique_tokens = []
+    for t in all_tokens:
+        if t not in seen:
+            seen.add(t)
+            unique_tokens.append(t)
+
+    # FTS5 查询：用 OR 连接所有 token
+    if len(unique_tokens) == 1:
+        return False, unique_tokens[0]
+    return False, " OR ".join(unique_tokens)
 
 
 def highlight_text(text, keywords, context_chars=80):

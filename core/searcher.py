@@ -1,10 +1,14 @@
-"""搜索引擎 - 全文搜索、模糊搜索、结果排序"""
+"""搜索引擎 - 全文搜索、模糊搜索、结果排序（优化版）
+- jieba 分词搜索
+- 多索引支持，每个结果记录来源索引
+- 修复多索引 root_path bug
+"""
 import os
 import time
 from .database import IndexDatabase
 from .text_utils import (
-    prepare_search_query, tokenize_chinese, highlight_text,
-    format_file_size, decode_bytes
+    prepare_search_query, highlight_text,
+    format_file_size, get_jieba
 )
 
 
@@ -12,7 +16,8 @@ class SearchResult:
     """搜索结果项"""
 
     def __init__(self, file_id, relative_path, filename, extension,
-                 file_size, modified_time, content, is_valid, rank=0):
+                 file_size, modified_time, content, is_valid, rank=0,
+                 db_path=None, root_path=None):
         self.file_id = file_id
         self.relative_path = relative_path
         self.filename = filename
@@ -22,6 +27,8 @@ class SearchResult:
         self.content = content or ""
         self.is_valid = is_valid
         self.rank = rank
+        self.db_path = db_path  # 来源索引路径
+        self.root_path = root_path  # 来源索引的根路径
 
     @property
     def file_size_str(self):
@@ -39,6 +46,13 @@ class SearchResult:
         """文件是否可用（硬盘是否连接）"""
         return self.is_valid == 1
 
+    @property
+    def full_path(self):
+        """获取文件完整路径"""
+        if self.root_path:
+            return os.path.join(self.root_path, self.relative_path)
+        return self.relative_path
+
     def get_snippets(self, keywords, context_chars=80):
         """获取关键词高亮片段"""
         if not self.content:
@@ -55,6 +69,10 @@ class SearchEngine:
 
     def load_index(self, db_path, label=None):
         """加载索引文件"""
+        # 检查是否已加载
+        for db in self.databases:
+            if db.db_path == db_path:
+                return db
         db = IndexDatabase()
         db.open(db_path)
         self.databases.append(db)
@@ -64,6 +82,10 @@ class SearchEngine:
 
     def unload_index(self, db_path):
         """卸载索引文件"""
+        for db in self.databases:
+            if db.db_path == db_path:
+                db.close()
+                break
         self.databases = [db for db in self.databases if db.db_path != db_path]
         if db_path in self.db_labels:
             del self.db_labels[db_path]
@@ -112,11 +134,14 @@ class SearchEngine:
         all_results = []
 
         for db in self.databases:
+            db_path = db.db_path
+            root_path = db.get_root_path()
+
             if is_fuzzy:
                 # 模糊搜索 - 使用LIKE
                 rows = db.search_like(processed_query, limit)
             else:
-                # 精确搜索 - 使用FTS5
+                # 精确搜索 - 使用FTS5（jieba分词后的查询）
                 rows = db.search_fts(processed_query, limit)
 
                 # 如果FTS没结果，回退到LIKE
@@ -124,7 +149,13 @@ class SearchEngine:
                     rows = db.search_like(query, limit)
 
             for row in rows:
-                result = SearchResult(*row[:8])
+                result = SearchResult(
+                    row[0], row[1], row[2], row[3],
+                    row[4], row[5], row[6], row[7],
+                    rank=row[8] if len(row) > 8 else 0,
+                    db_path=db_path,
+                    root_path=root_path
+                )
                 all_results.append(result)
 
         # 排序
@@ -134,7 +165,7 @@ class SearchEngine:
         seen = set()
         unique_results = []
         for r in all_results:
-            key = (r.relative_path, r.filename)
+            key = (r.root_path or "", r.relative_path, r.filename)
             if key not in seen:
                 seen.add(key)
                 unique_results.append(r)
@@ -145,9 +176,16 @@ class SearchEngine:
         """获取所有文件（空搜索时）"""
         all_results = []
         for db in self.databases:
+            root_path = db.get_root_path()
             rows = db.get_all_files(limit)
             for row in rows:
-                result = SearchResult(*row[:8])
+                result = SearchResult(
+                    row[0], row[1], row[2], row[3],
+                    row[4], row[5], row[6], row[7],
+                    rank=row[8] if len(row) > 8 else 0,
+                    db_path=db.db_path,
+                    root_path=root_path
+                )
                 all_results.append(result)
         return self._sort_results(all_results, sort_by)[:limit]
 
@@ -163,31 +201,59 @@ class SearchEngine:
             results.sort(key=lambda r: r.rank)
         return results
 
-    def get_file_content(self, file_id):
+    def get_file_content(self, file_id, db_path=None):
         """获取文件内容（离线查看）"""
+        # 优先从指定索引获取
+        if db_path:
+            for db in self.databases:
+                if db.db_path == db_path:
+                    content = db.get_file_content(file_id)
+                    if content:
+                        return content
+        # 回退到所有索引
         for db in self.databases:
             content = db.get_file_content(file_id)
             if content:
                 return content
         return ""
 
-    def get_file_by_id(self, file_id):
-        """根据ID获取文件信息（内容从FTS表获取）"""
+    def get_file_by_id(self, file_id, db_path=None):
+        """根据ID获取文件信息"""
+        # 优先从指定索引获取
+        if db_path:
+            for db in self.databases:
+                if db.db_path == db_path:
+                    row = db.get_file_by_id(file_id)
+                    if row:
+                        content = db.get_file_content(file_id)
+                        return SearchResult(
+                            row[0], row[1], row[2], row[3],
+                            row[4], row[5], content, row[6],
+                            db_path=db.db_path,
+                            root_path=db.get_root_path()
+                        )
+        # 回退到所有索引
         for db in self.databases:
             row = db.get_file_by_id(file_id)
             if row:
-                # row: (id, relative_path, filename, extension, file_size, modified_time, is_valid)
                 content = db.get_file_content(file_id)
-                return SearchResult(row[0], row[1], row[2], row[3], row[4], row[5], content, row[6])
+                return SearchResult(
+                    row[0], row[1], row[2], row[3],
+                    row[4], row[5], content, row[6],
+                    db_path=db.db_path,
+                    root_path=db.get_root_path()
+                )
         return None
 
     def get_full_path(self, result):
-        """获取文件的完整路径（结合当前根路径）"""
+        """获取文件的完整路径"""
+        if result.root_path:
+            return os.path.join(result.root_path, result.relative_path)
+        # 回退：遍历所有数据库
         for db in self.databases:
-            if db.db_path:
-                root = db.get_root_path()
-                if root:
-                    return os.path.join(root, result.relative_path)
+            root = db.get_root_path()
+            if root:
+                return os.path.join(root, result.relative_path)
         return result.relative_path
 
     def close(self):

@@ -1,4 +1,6 @@
-"""主窗口 - 搜索界面、结果列表、预览面板"""
+"""主窗口 - 现代化搜索界面
+深色主题 + 卡片式布局 + 多索引支持
+"""
 import os
 import sys
 import time
@@ -8,9 +10,9 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QSplitter, QComboBox, QSystemTrayIcon, QMenu,
     QAction, QApplication, QAbstractItemView, QStatusBar,
-    QMessageBox, QShortcut
+    QMessageBox, QShortcut, QFrame, QGraphicsDropShadowEffect
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation
 from PyQt5.QtGui import QFont, QIcon, QKeySequence, QColor
 
 from core.searcher import SearchEngine, SearchResult
@@ -50,75 +52,128 @@ class MainWindow(QMainWindow):
         self._load_config()
 
     def _setup_ui(self):
-        self.setWindowTitle("FileSearch - 文件全文搜索索引工具")
-        self.setMinimumSize(1100, 700)
-        self.resize(1200, 800)
+        self.setWindowTitle("FileSearch · 文件全文搜索")
+        self.setMinimumSize(1200, 750)
+        self.resize(1400, 850)
 
         # 中心部件
         central = QWidget()
+        central.setObjectName("centralWidget")
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(16, 12, 16, 8)
+        main_layout.setSpacing(10)
+
+        # ---- 顶部标题栏 ----
+        header_layout = QHBoxLayout()
+
+        title_label = QLabel("🔍 FileSearch")
+        title_label.setObjectName("appTitle")
+        title_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
+        title_label.setStyleSheet("color: #89b4fa;")
+        header_layout.addWidget(title_label)
+
+        header_layout.addStretch()
+
+        # 索引状态标签
+        self.lbl_index_badge = QLabel("未加载索引")
+        self.lbl_index_badge.setObjectName("indexBadge")
+        self.lbl_index_badge.setStyleSheet("""
+            QLabel {
+                background-color: #313244;
+                color: #a6adc8;
+                border-radius: 12px;
+                padding: 4px 14px;
+                font-size: 12px;
+            }
+        """)
+        header_layout.addWidget(self.lbl_index_badge)
+
+        # 索引管理按钮
+        self.btn_index = QPushButton("📁 索引管理")
+        self.btn_index.setObjectName("primaryBtn")
+        self.btn_index.setCursor(Qt.PointingHandCursor)
+        self.btn_index.clicked.connect(self._open_index_dialog)
+        header_layout.addWidget(self.btn_index)
+
+        main_layout.addLayout(header_layout)
 
         # ---- 搜索栏 ----
-        search_layout = QHBoxLayout()
+        search_container = QWidget()
+        search_container.setObjectName("searchContainer")
+        search_container.setStyleSheet("""
+            QWidget#searchContainer {
+                background-color: #181825;
+                border-radius: 12px;
+                padding: 4px;
+            }
+        """)
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(8, 4, 8, 4)
+        search_layout.setSpacing(8)
+
+        # 搜索图标
+        search_icon = QLabel("🔎")
+        search_icon.setStyleSheet("font-size: 18px; color: #585b70;")
+        search_layout.addWidget(search_icon)
 
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("输入关键词搜索... (支持 * 通配符, 空格分隔多关键词)")
+        self.txt_search.setPlaceholderText("搜索文件内容或文件名... (空格分隔多关键词，* 通配符)")
         self.txt_search.setFont(QFont("Microsoft YaHei", 12))
-        self.txt_search.setMinimumHeight(36)
+        self.txt_search.setStyleSheet("""
+            QLineEdit {
+                background-color: transparent;
+                border: none;
+                color: #cdd6f4;
+                padding: 6px 4px;
+            }
+        """)
         self.txt_search.textChanged.connect(self._on_search_changed)
         self.txt_search.returnPressed.connect(self._on_search_enter)
         search_layout.addWidget(self.txt_search, stretch=1)
 
         # 文件类型过滤
         self.cmb_ext_filter = QComboBox()
-        self.cmb_ext_filter.addItem("所有类型", "all")
+        self.cmb_ext_filter.addItem("全部类型", "all")
         for ext in [".doc", ".docx", ".xls", ".xlsx", ".pdf", ".ppt", ".pptx"]:
             self.cmb_ext_filter.addItem(ext.upper(), ext)
-        self.cmb_ext_filter.setMinimumWidth(100)
         self.cmb_ext_filter.currentIndexChanged.connect(self._on_filter_changed)
         search_layout.addWidget(self.cmb_ext_filter)
 
         # 排序
         self.cmb_sort = QComboBox()
-        self.cmb_sort.addItem("按相关度", "relevance")
-        self.cmb_sort.addItem("按时间", "time")
-        self.cmb_sort.addItem("按大小", "size")
-        self.cmb_sort.addItem("按名称", "name")
-        self.cmb_sort.setMinimumWidth(100)
+        self.cmb_sort.addItem("相关度", "relevance")
+        self.cmb_sort.addItem("时间", "time")
+        self.cmb_sort.addItem("大小", "size")
+        self.cmb_sort.addItem("名称", "name")
         self.cmb_sort.currentIndexChanged.connect(self._on_filter_changed)
         search_layout.addWidget(self.cmb_sort)
 
-        # 索引管理按钮
-        self.btn_index = QPushButton("📁 索引管理")
-        self.btn_index.clicked.connect(self._open_index_dialog)
-        search_layout.addWidget(self.btn_index)
+        main_layout.addWidget(search_container)
 
-        main_layout.addLayout(search_layout)
-
-        # ---- 状态栏 ----
-        status_layout = QHBoxLayout()
-        self.lbl_status = QLabel("未加载索引")
-        self.lbl_status.setStyleSheet("color: #666;")
-        status_layout.addWidget(self.lbl_status)
+        # ---- 结果统计栏 ----
+        stats_layout = QHBoxLayout()
 
         self.lbl_result_count = QLabel("")
-        status_layout.addWidget(self.lbl_result_count)
+        self.lbl_result_count.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        stats_layout.addWidget(self.lbl_result_count)
 
-        status_layout.addStretch()
+        stats_layout.addStretch()
 
-        self.lbl_index_info = QLabel("")
-        self.lbl_index_info.setStyleSheet("color: #888;")
-        status_layout.addWidget(self.lbl_index_info)
+        self.lbl_index_detail = QLabel("")
+        self.lbl_index_detail.setStyleSheet("color: #585b70; font-size: 11px;")
+        stats_layout.addWidget(self.lbl_index_detail)
 
-        main_layout.addLayout(status_layout)
+        main_layout.addLayout(stats_layout)
 
         # ---- 主内容区（分割器）----
         splitter = QSplitter(Qt.Horizontal)
 
         # 左侧: 结果列表
+        table_container = QWidget()
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+
         self.result_table = QTableWidget()
         self.result_table.setColumnCount(5)
         self.result_table.setHorizontalHeaderLabels(["文件名", "路径", "类型", "大小", "修改时间"])
@@ -132,16 +187,19 @@ class MainWindow(QMainWindow):
         self.result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.result_table.setAlternatingRowColors(True)
         self.result_table.verticalHeader().setVisible(False)
+        self.result_table.setShowGrid(False)
         self.result_table.itemSelectionChanged.connect(self._on_selection_changed)
         self.result_table.cellDoubleClicked.connect(self._on_double_click)
-        splitter.addWidget(self.result_table)
+        table_layout.addWidget(self.result_table)
+
+        splitter.addWidget(table_container)
 
         # 右侧: 预览面板
         self.preview_panel = PreviewPanel()
-        self.preview_panel.setMinimumWidth(300)
+        self.preview_panel.setMinimumWidth(320)
         splitter.addWidget(self.preview_panel)
 
-        splitter.setSizes([700, 400])
+        splitter.setSizes([800, 450])
         main_layout.addWidget(splitter, stretch=1)
 
         # 搜索防抖定时器
@@ -153,7 +211,6 @@ class MainWindow(QMainWindow):
         """设置系统托盘"""
         self.tray_icon = QSystemTrayIcon(self)
 
-        # 尝试设置图标（兼容打包后的 exe）
         if getattr(sys, 'frozen', False):
             icon_base = os.path.dirname(sys.executable)
         else:
@@ -163,10 +220,8 @@ class MainWindow(QMainWindow):
             self.tray_icon.setIcon(QIcon(icon_path))
             self.setWindowIcon(QIcon(icon_path))
         else:
-            # 使用默认图标
             self.tray_icon.setIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
 
-        # 托盘菜单
         tray_menu = QMenu()
 
         show_action = QAction("显示窗口", self)
@@ -185,11 +240,8 @@ class MainWindow(QMainWindow):
 
     def _setup_shortcuts(self):
         """设置快捷键"""
-        # Ctrl+F 聚焦搜索框
         QShortcut(QKeySequence("Ctrl+F"), self, self.txt_search.setFocus)
-        # Esc 清空搜索
         QShortcut(QKeySequence("Escape"), self, self._clear_search)
-        # Ctrl+Q 退出
         QShortcut(QKeySequence("Ctrl+Q"), self, self._quit_app)
 
     def _load_config(self):
@@ -201,7 +253,6 @@ class MainWindow(QMainWindow):
                 config = configparser.ConfigParser()
                 config.read(config_path, encoding="utf-8")
 
-                # 加载自动索引
                 if config.has_section("auto_load"):
                     for key in config.options("auto_load"):
                         db_path = config.get("auto_load", key)
@@ -211,7 +262,6 @@ class MainWindow(QMainWindow):
                             except Exception:
                                 pass
 
-                # 加载搜索历史
                 if config.has_section("search_history"):
                     self.search_history = [
                         config.get("search_history", f"h{i}")
@@ -230,12 +280,10 @@ class MainWindow(QMainWindow):
             import configparser
             config = configparser.ConfigParser()
 
-            # 保存自动加载的索引
             config.add_section("auto_load")
             for i, idx in enumerate(self.search_engine.get_loaded_indexes()):
                 config.set("auto_load", f"idx{i}", idx["path"])
 
-            # 保存搜索历史
             config.add_section("search_history")
             for i, h in enumerate(self.search_history[:20]):
                 config.set("search_history", f"h{i}", h)
@@ -247,7 +295,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _get_config_path(self):
-        """获取配置文件路径（兼容打包后的 exe）"""
+        """获取配置文件路径"""
         if getattr(sys, 'frozen', False):
             app_dir = os.path.dirname(sys.executable)
         else:
@@ -258,7 +306,7 @@ class MainWindow(QMainWindow):
 
     def _on_search_changed(self, text):
         """搜索框内容变化（防抖）"""
-        self._search_timer.start(300)  # 300ms 防抖
+        self._search_timer.start(300)
 
     def _on_search_enter(self):
         """回车键触发搜索"""
@@ -274,18 +322,16 @@ class MainWindow(QMainWindow):
         query = self.txt_search.text().strip()
         sort_by = self.cmb_sort.currentData()
 
-        # 记录搜索历史
         if query and query not in self.search_history:
             self.search_history.insert(0, query)
             self.search_history = self.search_history[:20]
 
         if not self.search_engine.databases:
-            self.lbl_status.setText("⚠️ 未加载索引，请先打开索引管理加载索引")
+            self.lbl_result_count.setText("⚠️ 请先加载索引")
             self.result_table.setRowCount(0)
             self.current_results = []
             return
 
-        # 在后台线程搜索
         if self.search_worker and self.search_worker.isRunning():
             self.search_worker.quit()
             self.search_worker.wait()
@@ -296,7 +342,6 @@ class MainWindow(QMainWindow):
 
     def _on_results_ready(self, results):
         """搜索结果就绪"""
-        # 应用文件类型过滤
         ext_filter = self.cmb_ext_filter.currentData()
         if ext_filter != "all":
             results = [r for r in results if r.extension.lower() == ext_filter]
@@ -319,17 +364,18 @@ class MainWindow(QMainWindow):
             item_name = QTableWidgetItem(result.filename)
             item_name.setData(Qt.UserRole, row)
             if not result.is_available:
-                item_name.setForeground(QColor("#999"))
+                item_name.setForeground(QColor("#585b70"))
             self.result_table.setItem(row, 0, item_name)
 
             # 路径
             item_path = QTableWidgetItem(result.relative_path)
             if not result.is_available:
-                item_path.setForeground(QColor("#999"))
+                item_path.setForeground(QColor("#585b70"))
             self.result_table.setItem(row, 1, item_path)
 
             # 类型
             item_ext = QTableWidgetItem(result.extension.upper().replace(".", ""))
+            item_ext.setForeground(QColor("#89b4fa"))
             self.result_table.setItem(row, 2, item_ext)
 
             # 大小
@@ -353,13 +399,8 @@ class MainWindow(QMainWindow):
             query = self.txt_search.text().strip()
             keywords = query.split() if query else []
 
-            # 获取根路径
-            root_path = ""
-            for db in self.search_engine.databases:
-                root_path = db.get_root_path()
-                break
-
-            self.preview_panel.show_file(result, root_path, keywords)
+            # 使用 result 自带的 root_path（修复多索引 bug）
+            self.preview_panel.show_file(result, keywords)
 
     def _on_double_click(self, row, col):
         """双击打开文件"""
@@ -367,25 +408,19 @@ class MainWindow(QMainWindow):
             return
 
         result = self.current_results[row]
-        root_path = ""
-        for db in self.search_engine.databases:
-            root_path = db.get_root_path()
-            break
+        full_path = result.full_path
 
-        if root_path:
-            full_path = os.path.join(root_path, result.relative_path)
-            if os.path.exists(full_path):
-                # 用默认程序打开
-                if sys.platform == "win32":
-                    os.startfile(full_path)
-                else:
-                    subprocess.Popen(["xdg-open", full_path])
+        if os.path.exists(full_path):
+            if sys.platform == "win32":
+                os.startfile(full_path)
             else:
-                QMessageBox.information(
-                    self, "文件不可用",
-                    f"文件所在硬盘可能未连接。\n\n路径: {full_path}\n\n"
-                    f"索引中保存的内容仍可在右侧预览面板查看。"
-                )
+                subprocess.Popen(["xdg-open", full_path])
+        else:
+            QMessageBox.information(
+                self, "文件不可用",
+                f"文件所在硬盘可能未连接。\n\n路径: {full_path}\n\n"
+                f"索引中保存的内容仍可在右侧预览面板查看。"
+            )
 
     def _clear_search(self):
         """清空搜索"""
@@ -399,53 +434,65 @@ class MainWindow(QMainWindow):
         dialog = IndexDialog(self.search_engine, self)
         dialog.exec_()
         self._update_index_info()
-        self._do_search()  # 重新搜索以显示新索引的结果
+        self._do_search()
 
     def _update_index_info(self):
         """更新索引信息状态"""
         indexes = self.search_engine.get_loaded_indexes()
         if not indexes:
-            self.lbl_status.setText("⚠️ 未加载索引")
-            self.lbl_index_info.setText("")
+            self.lbl_index_badge.setText("⚠️ 未加载索引")
+            self.lbl_index_badge.setStyleSheet("""
+                QLabel {
+                    background-color: #45475a;
+                    color: #f38ba8;
+                    border-radius: 12px;
+                    padding: 4px 14px;
+                    font-size: 12px;
+                }
+            """)
+            self.lbl_index_detail.setText("")
             return
 
         total_files = sum(idx["total_files"] for idx in indexes)
         total_size = sum(idx["index_size"] for idx in indexes)
         names = [idx["label"] for idx in indexes]
 
-        self.lbl_status.setText(f"✅ 已加载 {len(indexes)} 个索引")
-        self.lbl_index_info.setText(
-            f"索引: {', '.join(names)} | "
-            f"文件: {total_files} | "
-            f"索引大小: {format_file_size(total_size)}"
+        self.lbl_index_badge.setText(f"✅ {len(indexes)} 个索引 · {total_files} 文件")
+        self.lbl_index_badge.setStyleSheet("""
+            QLabel {
+                background-color: #313244;
+                color: #a6e3a1;
+                border-radius: 12px;
+                padding: 4px 14px;
+                font-size: 12px;
+            }
+        """)
+        self.lbl_index_detail.setText(
+            f"{', '.join(names)} · 索引大小: {format_file_size(total_size)}"
         )
 
     # ---- 系统托盘 ----
 
     def _on_tray_activated(self, reason):
-        """托盘图标激活"""
         if reason == QSystemTrayIcon.DoubleClick:
             self._show_from_tray()
 
     def _show_from_tray(self):
-        """从托盘恢复窗口"""
         self.show()
         self.showNormal()
         self.activateWindow()
 
     def closeEvent(self, event):
-        """关闭窗口时最小化到托盘"""
         event.ignore()
         self.hide()
         self.tray_icon.showMessage(
             "FileSearch",
-            "程序已最小化到系统托盘，双击图标恢复窗口",
+            "程序已最小化到系统托盘，双击图标恢复",
             QSystemTrayIcon.Information,
             2000
         )
 
     def _quit_app(self):
-        """退出程序"""
         self._save_config()
         self.search_engine.close()
         self.tray_icon.hide()

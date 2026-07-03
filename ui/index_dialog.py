@@ -1,14 +1,17 @@
-"""索引管理对话框 - 创建/更新索引、管理索引文件"""
+"""索引管理对话框 - 创建/更新索引、管理索引文件
+现代化深色主题设计
+"""
 import os
 import sys
 import time
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFileDialog, QCheckBox, QGroupBox, QProgressBar, QTextEdit,
+    QFileDialog, QCheckBox, QProgressBar, QTextEdit,
     QComboBox, QMessageBox, QListWidget, QListWidgetItem, QRadioButton,
-    QButtonGroup, QWidget
+    QWidget, QFrame
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 
 from core.indexer import IndexerThread
 from core.parsers import get_supported_extensions
@@ -25,38 +28,75 @@ class IndexDialog(QDialog):
         self._refresh_index_list()
 
     def _setup_ui(self):
-        self.setWindowTitle("索引管理")
-        self.setMinimumSize(600, 500)
+        self.setWindowTitle("📁 索引管理")
+        self.setMinimumSize(680, 620)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e2e;
+            }
+        """)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
 
         # ---- 已加载的索引列表 ----
-        loaded_group = QGroupBox("已加载的索引")
-        loaded_layout = QVBoxLayout(loaded_group)
+        loaded_header = QLabel("📦 已加载的索引")
+        loaded_header.setStyleSheet("color: #89b4fa; font-size: 13px; font-weight: 600;")
+        layout.addWidget(loaded_header)
+
+        loaded_card = QWidget()
+        loaded_card.setStyleSheet("""
+            QWidget {
+                background-color: #181825;
+                border: 1px solid #313244;
+                border-radius: 10px;
+            }
+        """)
+        loaded_layout = QVBoxLayout(loaded_card)
+        loaded_layout.setContentsMargins(12, 12, 12, 12)
+        loaded_layout.setSpacing(10)
 
         self.index_list = QListWidget()
-        self.index_list.setMaximumHeight(120)
+        self.index_list.setMaximumHeight(110)
         loaded_layout.addWidget(self.index_list)
 
         btn_layout = QHBoxLayout()
-        self.btn_load = QPushButton("加载索引")
+        self.btn_load = QPushButton("📂 加载索引")
+        self.btn_load.setObjectName("primaryBtn")
         self.btn_load.clicked.connect(self._load_index)
-        self.btn_unload = QPushButton("卸载选中")
+        self.btn_unload = QPushButton("⛔ 卸载选中")
+        self.btn_unload.setObjectName("dangerBtn")
         self.btn_unload.clicked.connect(self._unload_index)
         btn_layout.addWidget(self.btn_load)
         btn_layout.addWidget(self.btn_unload)
         btn_layout.addStretch()
         loaded_layout.addLayout(btn_layout)
 
-        layout.addWidget(loaded_group)
+        layout.addWidget(loaded_card)
 
         # ---- 创建/更新索引 ----
-        create_group = QGroupBox("创建/更新索引")
-        create_layout = QVBoxLayout(create_group)
+        create_header = QLabel("⚙️ 创建/更新索引")
+        create_header.setStyleSheet("color: #89b4fa; font-size: 13px; font-weight: 600;")
+        layout.addWidget(create_header)
+
+        create_card = QWidget()
+        create_card.setStyleSheet("""
+            QWidget {
+                background-color: #181825;
+                border: 1px solid #313244;
+                border-radius: 10px;
+            }
+        """)
+        create_layout = QVBoxLayout(create_card)
+        create_layout.setContentsMargins(12, 12, 12, 12)
+        create_layout.setSpacing(10)
 
         # 源目录
-        dir_layout = QHBoxLayout()
-        dir_layout.addWidget(QLabel("扫描目录:"))
+        dir_row = QHBoxLayout()
+        dir_label = QLabel("扫描目录:")
+        dir_label.setStyleSheet("color: #a6adc8; font-size: 12px; min-width: 70px;")
+        dir_row.addWidget(dir_label)
         self.txt_source = QComboBox()
         self.txt_source.setEditable(True)
         self.txt_source.setMinimumWidth(300)
@@ -65,70 +105,88 @@ class IndexDialog(QDialog):
             drive = f"{letter}:\\"
             if os.path.exists(drive):
                 self.txt_source.addItem(drive)
-        dir_layout.addWidget(self.txt_source, stretch=1)
+        dir_row.addWidget(self.txt_source, stretch=1)
         self.btn_browse_source = QPushButton("浏览...")
         self.btn_browse_source.clicked.connect(self._browse_source)
-        dir_layout.addWidget(self.btn_browse_source)
-        create_layout.addLayout(dir_layout)
+        dir_row.addWidget(self.btn_browse_source)
+        create_layout.addLayout(dir_row)
 
         # 索引保存位置
-        save_layout = QHBoxLayout()
-        save_layout.addWidget(QLabel("索引保存:"))
+        save_row = QHBoxLayout()
+        save_label = QLabel("索引保存:")
+        save_label.setStyleSheet("color: #a6adc8; font-size: 12px; min-width: 70px;")
+        save_row.addWidget(save_label)
         self.txt_save = QComboBox()
         self.txt_save.setEditable(True)
         self.txt_save.setMinimumWidth(300)
-        # 默认保存到程序目录（兼容打包后的 exe）
+        # 默认保存到程序目录
         if getattr(sys, 'frozen', False):
             app_dir = os.path.dirname(sys.executable)
         else:
             app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.txt_save.addItem(os.path.join(app_dir, "indexes"))
-        dir_layout.addWidget(self.txt_save, stretch=1)
+        save_row.addWidget(self.txt_save, stretch=1)
         self.btn_browse_save = QPushButton("浏览...")
         self.btn_browse_save.clicked.connect(self._browse_save)
-        save_layout.addWidget(self.txt_save, stretch=1)
-        save_layout.addWidget(self.btn_browse_save)
-        create_layout.addLayout(save_layout)
+        save_row.addWidget(self.btn_browse_save)
+        create_layout.addLayout(save_row)
 
         # 文件类型选择
-        type_group = QGroupBox("索引文件类型")
-        type_layout = QHBoxLayout(type_group)
+        type_label = QLabel("索引文件类型:")
+        type_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        create_layout.addWidget(type_label)
+
+        type_row = QHBoxLayout()
         self.type_checks = {}
         for ext in get_supported_extensions():
             cb = QCheckBox(ext.upper().replace(".", ""))
             cb.setChecked(True)
             self.type_checks[ext] = cb
-            type_layout.addWidget(cb)
-        type_layout.addStretch()
-        create_layout.addWidget(type_group)
+            type_row.addWidget(cb)
+        type_row.addStretch()
+        create_layout.addLayout(type_row)
 
         # 索引模式
-        mode_layout = QHBoxLayout()
+        mode_row = QHBoxLayout()
         self.radio_incremental = QRadioButton("增量索引（推荐，只处理新增/修改的文件）")
         self.radio_incremental.setChecked(True)
         self.radio_full = QRadioButton("全量重建（删除旧索引重新扫描）")
-        mode_layout.addWidget(self.radio_incremental)
-        mode_layout.addWidget(self.radio_full)
-        create_layout.addLayout(mode_layout)
+        mode_row.addWidget(self.radio_incremental)
+        mode_row.addWidget(self.radio_full)
+        create_layout.addLayout(mode_row)
 
         # 开始/取消按钮
-        action_layout = QHBoxLayout()
-        self.btn_start = QPushButton("开始索引")
-        self.btn_start.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 8px 20px; font-weight: bold; }")
+        action_row = QHBoxLayout()
+        self.btn_start = QPushButton("🚀 开始索引")
+        self.btn_start.setObjectName("successBtn")
+        self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self._start_index)
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton("⏹ 取消")
         self.btn_cancel.clicked.connect(self._cancel_index)
         self.btn_cancel.setEnabled(False)
-        action_layout.addWidget(self.btn_start)
-        action_layout.addWidget(self.btn_cancel)
-        action_layout.addStretch()
-        create_layout.addLayout(action_layout)
+        action_row.addWidget(self.btn_start)
+        action_row.addWidget(self.btn_cancel)
+        action_row.addStretch()
+        create_layout.addLayout(action_row)
 
-        layout.addWidget(create_group)
+        layout.addWidget(create_card)
 
-        # ---- 进度 ----
-        progress_group = QGroupBox("进度")
-        progress_layout = QVBoxLayout(progress_group)
+        # ---- 进度区 ----
+        progress_header = QLabel("📊 进度")
+        progress_header.setStyleSheet("color: #89b4fa; font-size: 13px; font-weight: 600;")
+        layout.addWidget(progress_header)
+
+        progress_card = QWidget()
+        progress_card.setStyleSheet("""
+            QWidget {
+                background-color: #181825;
+                border: 1px solid #313244;
+                border-radius: 10px;
+            }
+        """)
+        progress_layout = QVBoxLayout(progress_card)
+        progress_layout.setContentsMargins(12, 12, 12, 12)
+        progress_layout.setSpacing(8)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
@@ -137,6 +195,7 @@ class IndexDialog(QDialog):
         progress_layout.addWidget(self.progress_bar)
 
         self.lbl_progress = QLabel("就绪")
+        self.lbl_progress.setStyleSheet("color: #a6adc8; font-size: 12px;")
         progress_layout.addWidget(self.lbl_progress)
 
         self.txt_log = QTextEdit()
@@ -145,18 +204,18 @@ class IndexDialog(QDialog):
         self.txt_log.setFont(self._get_monospace_font())
         progress_layout.addWidget(self.txt_log)
 
-        layout.addWidget(progress_group)
+        layout.addWidget(progress_card)
 
         # 关闭按钮
-        close_layout = QHBoxLayout()
-        close_layout.addStretch()
+        close_row = QHBoxLayout()
+        close_row.addStretch()
         self.btn_close = QPushButton("关闭")
+        self.btn_close.setCursor(Qt.PointingHandCursor)
         self.btn_close.clicked.connect(self.close)
-        close_layout.addWidget(self.btn_close)
-        layout.addLayout(close_layout)
+        close_row.addWidget(self.btn_close)
+        layout.addLayout(close_row)
 
     def _get_monospace_font(self):
-        from PyQt5.QtGui import QFont
         font = QFont("Consolas, Microsoft YaHei", 9)
         font.setStyleHint(QFont.Monospace)
         return font
@@ -168,7 +227,7 @@ class IndexDialog(QDialog):
             label = idx["label"]
             root = idx["root_path"]
             count = idx["total_files"]
-            item = QListWidgetItem(f"{label} | 根目录: {root} | 文件数: {count}")
+            item = QListWidgetItem(f"📁 {label}  |  根目录: {root}  |  文件数: {count}")
             item.setData(Qt.UserRole, idx["path"])
             self.index_list.addItem(item)
 
@@ -284,15 +343,15 @@ class IndexDialog(QDialog):
         if total > 0:
             pct = int(current / total * 100)
             self.progress_bar.setValue(pct)
-            self.lbl_progress.setText(f"{current}/{total} - {filename}")
+            self.lbl_progress.setText(f"{current}/{total} — {filename}")
 
     def _on_phase(self, phase):
         """阶段变化"""
         phase_names = {
-            "scanning": "扫描文件...",
-            "parsing": "解析内容...",
-            "indexing": "构建索引...",
-            "done": "完成!"
+            "scanning": "🔍 扫描文件...",
+            "parsing": "📖 解析内容...",
+            "indexing": "📇 构建索引...",
+            "done": "✅ 完成!"
         }
         name = phase_names.get(phase, phase)
         self.lbl_progress.setText(name)
@@ -328,7 +387,7 @@ class IndexDialog(QDialog):
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         QMessageBox.critical(self, "索引错误", error_msg)
-        self._log(f"错误: {error_msg}")
+        self._log(f"❌ 错误: {error_msg}")
 
     def _log(self, message):
         """添加日志"""
