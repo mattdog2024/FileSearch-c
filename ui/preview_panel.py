@@ -1,9 +1,9 @@
 """预览面板 - 文件信息与内容预览
-现代化深色主题设计
+现代化深色主题设计 - 精致版
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QGraphicsDropShadowEffect
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
@@ -29,13 +29,20 @@ class PreviewPanel(QWidget):
         self.info_card.setStyleSheet("""
             QWidget#infoCard {
                 background-color: #181825;
-                border-radius: 10px;
+                border-radius: 12px;
                 border: 1px solid #313244;
             }
         """)
+        # 添加阴影
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(16)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        shadow.setOffset(0, 2)
+        self.info_card.setGraphicsEffect(shadow)
+
         info_layout = QVBoxLayout(self.info_card)
-        info_layout.setContentsMargins(16, 14, 16, 14)
-        info_layout.setSpacing(8)
+        info_layout.setContentsMargins(18, 16, 18, 16)
+        info_layout.setSpacing(10)
 
         # 文件名标题
         self.lbl_filename = QLabel("选择一个文件查看详情")
@@ -47,7 +54,7 @@ class PreviewPanel(QWidget):
         # 分隔线
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.HLine)
-        sep1.setStyleSheet("color: #313244;")
+        sep1.setStyleSheet("background-color: #313244; max-height: 1px;")
         info_layout.addWidget(sep1)
 
         # 文件属性网格
@@ -56,7 +63,7 @@ class PreviewPanel(QWidget):
 
         # 左侧属性
         left_attrs = QVBoxLayout()
-        left_attrs.setSpacing(6)
+        left_attrs.setSpacing(8)
 
         self.lbl_type = self._make_attr_label("类型", "—")
         self.lbl_size = self._make_attr_label("大小", "—")
@@ -66,7 +73,7 @@ class PreviewPanel(QWidget):
 
         # 右侧属性
         right_attrs = QVBoxLayout()
-        right_attrs.setSpacing(6)
+        right_attrs.setSpacing(8)
 
         self.lbl_time = self._make_attr_label("修改时间", "—")
         self.lbl_source = self._make_attr_label("来源索引", "—")
@@ -78,20 +85,30 @@ class PreviewPanel(QWidget):
 
         # 文件路径
         self.lbl_path = QLabel("")
-        self.lbl_path.setStyleSheet("color: #585b70; font-size: 11px;")
+        self.lbl_path.setStyleSheet("""
+            color: #585b70;
+            font-size: 11px;
+            padding: 4px 0;
+        """)
         self.lbl_path.setWordWrap(True)
         info_layout.addWidget(self.lbl_path)
 
         layout.addWidget(self.info_card)
+        layout.addSpacing(12)
 
         # ---- 内容预览区 ----
         preview_header = QWidget()
-        preview_header.setStyleSheet("background-color: #1e1e2e;")
+        preview_header.setStyleSheet("background-color: transparent;")
         ph_layout = QHBoxLayout(preview_header)
-        ph_layout.setContentsMargins(4, 8, 4, 4)
+        ph_layout.setContentsMargins(4, 0, 4, 8)
 
-        lbl_preview_title = QLabel("📄 内容预览")
-        lbl_preview_title.setStyleSheet("color: #89b4fa; font-size: 12px; font-weight: 600;")
+        lbl_preview_title = QLabel("内容预览")
+        lbl_preview_title.setStyleSheet("""
+            color: #89b4fa;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 0;
+        """)
         ph_layout.addWidget(lbl_preview_title)
         ph_layout.addStretch()
 
@@ -105,9 +122,9 @@ class PreviewPanel(QWidget):
             QTextEdit {
                 background-color: #1e1e2e;
                 border: 1px solid #313244;
-                border-radius: 8px;
+                border-radius: 10px;
                 color: #bac2de;
-                padding: 12px;
+                padding: 14px;
                 selection-background-color: #45475a;
                 selection-color: #cdd6f4;
             }
@@ -116,12 +133,17 @@ class PreviewPanel(QWidget):
 
         # ---- 关键词匹配片段区 ----
         self.snippet_header = QWidget()
-        self.snippet_header.setStyleSheet("background-color: #1e1e2e;")
+        self.snippet_header.setStyleSheet("background-color: transparent;")
         sh_layout = QHBoxLayout(self.snippet_header)
         sh_layout.setContentsMargins(4, 8, 4, 4)
 
-        lbl_snippet_title = QLabel("🔍 匹配片段")
-        lbl_snippet_title.setStyleSheet("color: #f9e2af; font-size: 12px; font-weight: 600;")
+        lbl_snippet_title = QLabel("匹配片段")
+        lbl_snippet_title.setStyleSheet("""
+            color: #f9e2af;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 0;
+        """)
         sh_layout.addWidget(lbl_snippet_title)
         sh_layout.addStretch()
 
@@ -138,9 +160,9 @@ class PreviewPanel(QWidget):
             QTextEdit {
                 background-color: #181825;
                 border: 1px solid #313244;
-                border-radius: 8px;
+                border-radius: 10px;
                 color: #bac2de;
-                padding: 10px;
+                padding: 12px;
                 selection-background-color: #45475a;
                 selection-color: #cdd6f4;
             }
@@ -194,13 +216,21 @@ class PreviewPanel(QWidget):
 
         # 路径
         full_path = result.full_path
-        self.lbl_path.setText(f"📂 {full_path}")
+        self.lbl_path.setText(full_path)
 
         # 可用性标记
         if result.is_available:
-            self.lbl_path.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+            self.lbl_path.setStyleSheet("""
+                color: #a6e3a1;
+                font-size: 11px;
+                padding: 4px 0;
+            """)
         else:
-            self.lbl_path.setStyleSheet("color: #f38ba8; font-size: 11px;")
+            self.lbl_path.setStyleSheet("""
+                color: #f38ba8;
+                font-size: 11px;
+                padding: 4px 0;
+            """)
 
         # 内容预览
         content = result.content or ""
@@ -214,9 +244,9 @@ class PreviewPanel(QWidget):
                 QTextEdit {
                     background-color: #1e1e2e;
                     border: 1px solid #313244;
-                    border-radius: 8px;
+                    border-radius: 10px;
                     color: #bac2de;
-                    padding: 12px;
+                    padding: 14px;
                     selection-background-color: #45475a;
                     selection-color: #cdd6f4;
                 }
@@ -227,9 +257,9 @@ class PreviewPanel(QWidget):
                 QTextEdit {
                     background-color: #1e1e2e;
                     border: 1px solid #313244;
-                    border-radius: 8px;
+                    border-radius: 10px;
                     color: #585b70;
-                    padding: 12px;
+                    padding: 14px;
                 }
             """)
 
@@ -267,8 +297,8 @@ class PreviewPanel(QWidget):
                 )
 
             html_parts.append(
-                f'<div style="margin-bottom:8px; padding:6px 8px; '
-                f'background-color:#313244; border-radius:6px; '
+                f'<div style="margin-bottom:8px; padding:8px 10px; '
+                f'background-color:#313244; border-radius:8px; '
                 f'font-size:12px; line-height:1.5;">'
                 f'{escaped}</div>'
             )
@@ -288,9 +318,9 @@ class PreviewPanel(QWidget):
             QTextEdit {
                 background-color: #1e1e2e;
                 border: 1px solid #313244;
-                border-radius: 8px;
+                border-radius: 10px;
                 color: #585b70;
-                padding: 12px;
+                padding: 14px;
             }
         """)
         self.snippet_header.setVisible(False)
