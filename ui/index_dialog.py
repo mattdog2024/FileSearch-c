@@ -1,0 +1,336 @@
+"""索引管理对话框 - 创建/更新索引、管理索引文件"""
+import os
+import sys
+import time
+from PyQt5.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFileDialog, QCheckBox, QGroupBox, QProgressBar, QTextEdit,
+    QComboBox, QMessageBox, QListWidget, QListWidgetItem, QRadioButton,
+    QButtonGroup, QWidget
+)
+from PyQt5.QtCore import Qt, QTimer
+
+from core.indexer import IndexerThread
+from core.parsers import get_supported_extensions
+
+
+class IndexDialog(QDialog):
+    """索引管理对话框"""
+
+    def __init__(self, search_engine, parent=None):
+        super().__init__(parent)
+        self.search_engine = search_engine
+        self.indexer_thread = None
+        self._setup_ui()
+        self._refresh_index_list()
+
+    def _setup_ui(self):
+        self.setWindowTitle("索引管理")
+        self.setMinimumSize(600, 500)
+
+        layout = QVBoxLayout(self)
+
+        # ---- 已加载的索引列表 ----
+        loaded_group = QGroupBox("已加载的索引")
+        loaded_layout = QVBoxLayout(loaded_group)
+
+        self.index_list = QListWidget()
+        self.index_list.setMaximumHeight(120)
+        loaded_layout.addWidget(self.index_list)
+
+        btn_layout = QHBoxLayout()
+        self.btn_load = QPushButton("加载索引")
+        self.btn_load.clicked.connect(self._load_index)
+        self.btn_unload = QPushButton("卸载选中")
+        self.btn_unload.clicked.connect(self._unload_index)
+        btn_layout.addWidget(self.btn_load)
+        btn_layout.addWidget(self.btn_unload)
+        btn_layout.addStretch()
+        loaded_layout.addLayout(btn_layout)
+
+        layout.addWidget(loaded_group)
+
+        # ---- 创建/更新索引 ----
+        create_group = QGroupBox("创建/更新索引")
+        create_layout = QVBoxLayout(create_group)
+
+        # 源目录
+        dir_layout = QHBoxLayout()
+        dir_layout.addWidget(QLabel("扫描目录:"))
+        self.txt_source = QComboBox()
+        self.txt_source.setEditable(True)
+        self.txt_source.setMinimumWidth(300)
+        # 添加常见盘符
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                self.txt_source.addItem(drive)
+        dir_layout.addWidget(self.txt_source, stretch=1)
+        self.btn_browse_source = QPushButton("浏览...")
+        self.btn_browse_source.clicked.connect(self._browse_source)
+        dir_layout.addWidget(self.btn_browse_source)
+        create_layout.addLayout(dir_layout)
+
+        # 索引保存位置
+        save_layout = QHBoxLayout()
+        save_layout.addWidget(QLabel("索引保存:"))
+        self.txt_save = QComboBox()
+        self.txt_save.setEditable(True)
+        self.txt_save.setMinimumWidth(300)
+        # 默认保存到程序目录（兼容打包后的 exe）
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.txt_save.addItem(os.path.join(app_dir, "indexes"))
+        dir_layout.addWidget(self.txt_save, stretch=1)
+        self.btn_browse_save = QPushButton("浏览...")
+        self.btn_browse_save.clicked.connect(self._browse_save)
+        save_layout.addWidget(self.txt_save, stretch=1)
+        save_layout.addWidget(self.btn_browse_save)
+        create_layout.addLayout(save_layout)
+
+        # 文件类型选择
+        type_group = QGroupBox("索引文件类型")
+        type_layout = QHBoxLayout(type_group)
+        self.type_checks = {}
+        for ext in get_supported_extensions():
+            cb = QCheckBox(ext.upper().replace(".", ""))
+            cb.setChecked(True)
+            self.type_checks[ext] = cb
+            type_layout.addWidget(cb)
+        type_layout.addStretch()
+        create_layout.addWidget(type_group)
+
+        # 索引模式
+        mode_layout = QHBoxLayout()
+        self.radio_incremental = QRadioButton("增量索引（推荐，只处理新增/修改的文件）")
+        self.radio_incremental.setChecked(True)
+        self.radio_full = QRadioButton("全量重建（删除旧索引重新扫描）")
+        mode_layout.addWidget(self.radio_incremental)
+        mode_layout.addWidget(self.radio_full)
+        create_layout.addLayout(mode_layout)
+
+        # 开始/取消按钮
+        action_layout = QHBoxLayout()
+        self.btn_start = QPushButton("开始索引")
+        self.btn_start.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 8px 20px; font-weight: bold; }")
+        self.btn_start.clicked.connect(self._start_index)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self._cancel_index)
+        self.btn_cancel.setEnabled(False)
+        action_layout.addWidget(self.btn_start)
+        action_layout.addWidget(self.btn_cancel)
+        action_layout.addStretch()
+        create_layout.addLayout(action_layout)
+
+        layout.addWidget(create_group)
+
+        # ---- 进度 ----
+        progress_group = QGroupBox("进度")
+        progress_layout = QVBoxLayout(progress_group)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        progress_layout.addWidget(self.progress_bar)
+
+        self.lbl_progress = QLabel("就绪")
+        progress_layout.addWidget(self.lbl_progress)
+
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setMaximumHeight(120)
+        self.txt_log.setFont(self._get_monospace_font())
+        progress_layout.addWidget(self.txt_log)
+
+        layout.addWidget(progress_group)
+
+        # 关闭按钮
+        close_layout = QHBoxLayout()
+        close_layout.addStretch()
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.close)
+        close_layout.addWidget(self.btn_close)
+        layout.addLayout(close_layout)
+
+    def _get_monospace_font(self):
+        from PyQt5.QtGui import QFont
+        font = QFont("Consolas, Microsoft YaHei", 9)
+        font.setStyleHint(QFont.Monospace)
+        return font
+
+    def _refresh_index_list(self):
+        """刷新已加载索引列表"""
+        self.index_list.clear()
+        for idx in self.search_engine.get_loaded_indexes():
+            label = idx["label"]
+            root = idx["root_path"]
+            count = idx["total_files"]
+            item = QListWidgetItem(f"{label} | 根目录: {root} | 文件数: {count}")
+            item.setData(Qt.UserRole, idx["path"])
+            self.index_list.addItem(item)
+
+    def _load_index(self):
+        """加载索引文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择索引文件", "",
+            "索引文件 (*.db);;所有文件 (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            self.search_engine.load_index(file_path)
+            self._refresh_index_list()
+            self._log(f"已加载索引: {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载索引失败:\n{e}")
+
+    def _unload_index(self):
+        """卸载选中的索引"""
+        current = self.index_list.currentItem()
+        if not current:
+            return
+        db_path = current.data(Qt.UserRole)
+        self.search_engine.unload_index(db_path)
+        self._refresh_index_list()
+        self._log(f"已卸载索引: {db_path}")
+
+    def _browse_source(self):
+        """选择扫描目录"""
+        dir_path = QFileDialog.getExistingDirectory(self, "选择要扫描的目录")
+        if dir_path:
+            self.txt_source.setEditText(dir_path)
+
+    def _browse_save(self):
+        """选择索引保存位置"""
+        dir_path = QFileDialog.getExistingDirectory(self, "选择索引保存目录")
+        if dir_path:
+            self.txt_save.setEditText(dir_path)
+
+    def _start_index(self):
+        """开始索引"""
+        source = self.txt_source.currentText().strip()
+        save_dir = self.txt_save.currentText().strip()
+
+        if not source:
+            QMessageBox.warning(self, "提示", "请选择要扫描的目录")
+            return
+        if not os.path.isdir(source):
+            QMessageBox.warning(self, "提示", f"目录不存在: {source}")
+            return
+        if not save_dir:
+            QMessageBox.warning(self, "提示", "请选择索引保存位置")
+            return
+
+        # 确保保存目录存在
+        os.makedirs(save_dir, exist_ok=True)
+
+        # 获取选中的文件类型
+        file_types = [ext for ext, cb in self.type_checks.items() if cb.isChecked()]
+        if not file_types:
+            QMessageBox.warning(self, "提示", "请至少选择一种文件类型")
+            return
+
+        # 生成索引文件名
+        dir_name = os.path.basename(source.rstrip("\\/"))
+        if not dir_name:
+            dir_name = "root"
+        db_filename = f"{dir_name}_index.db"
+        db_path = os.path.join(save_dir, db_filename)
+
+        # 索引模式
+        is_incremental = self.radio_incremental.isChecked()
+        if not is_incremental and os.path.exists(db_path):
+            reply = QMessageBox.question(
+                self, "确认",
+                f"索引文件已存在: {db_path}\n全量重建将覆盖此文件，确定继续？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            os.remove(db_path)
+
+        # 启动索引线程
+        self.btn_start.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.lbl_progress.setText("正在启动...")
+
+        self.indexer_thread = IndexerThread(
+            root_path=source,
+            db_path=db_path,
+            file_types=file_types,
+            is_incremental=is_incremental
+        )
+        self.indexer_thread.progress.connect(self._on_progress)
+        self.indexer_thread.phase_changed.connect(self._on_phase)
+        self.indexer_thread.finished.connect(self._on_finished)
+        self.indexer_thread.error.connect(self._on_error)
+        self.indexer_thread.log_message.connect(self._log)
+        self.indexer_thread.start()
+
+    def _cancel_index(self):
+        """取消索引"""
+        if self.indexer_thread:
+            self.indexer_thread.cancel()
+            self.lbl_progress.setText("正在取消...")
+            self._log("用户取消索引")
+
+    def _on_progress(self, current, total, filename):
+        """进度更新"""
+        if total > 0:
+            pct = int(current / total * 100)
+            self.progress_bar.setValue(pct)
+            self.lbl_progress.setText(f"{current}/{total} - {filename}")
+
+    def _on_phase(self, phase):
+        """阶段变化"""
+        phase_names = {
+            "scanning": "扫描文件...",
+            "parsing": "解析内容...",
+            "indexing": "构建索引...",
+            "done": "完成!"
+        }
+        name = phase_names.get(phase, phase)
+        self.lbl_progress.setText(name)
+
+        if phase == "done":
+            self.btn_start.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
+            self.progress_bar.setValue(100)
+            self._refresh_index_list()
+
+    def _on_finished(self, total, new_count, updated_count):
+        """索引完成"""
+        self.btn_start.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self.progress_bar.setValue(100)
+        self._log(f"索引完成: 总计{total}个文件, 新增{new_count}, 更新{updated_count}")
+        self._refresh_index_list()
+
+        # 自动加载新创建的索引
+        source = self.txt_source.currentText().strip()
+        save_dir = self.txt_save.currentText().strip()
+        dir_name = os.path.basename(source.rstrip("\\/"))
+        db_path = os.path.join(save_dir, f"{dir_name}_index.db")
+        if os.path.exists(db_path):
+            try:
+                self.search_engine.load_index(db_path)
+                self._refresh_index_list()
+            except Exception:
+                pass
+
+    def _on_error(self, error_msg):
+        """索引错误"""
+        self.btn_start.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        QMessageBox.critical(self, "索引错误", error_msg)
+        self._log(f"错误: {error_msg}")
+
+    def _log(self, message):
+        """添加日志"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.txt_log.append(f"[{timestamp}] {message}")
