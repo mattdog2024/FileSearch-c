@@ -4,12 +4,14 @@
 def parse_pdf(filepath):
     """解析 PDF 文件，提取全文文本
     优化策略：先用 PyPDF2（快），失败/空结果再用 pdfplumber（慢但准确）
+    避免重复解析：缓存第一次 PyPDF2 结果
     """
     # 优先使用 PyPDF2（速度快10倍以上）
+    pypdf2_result = None
     try:
-        text = _parse_with_pypdf2(filepath)
-        if text and len(text.strip()) > 50:
-            return text
+        pypdf2_result = _parse_with_pypdf2(filepath)
+        if pypdf2_result and len(pypdf2_result.strip()) > 50:
+            return pypdf2_result
     except ImportError:
         pass
     except Exception:
@@ -17,19 +19,19 @@ def parse_pdf(filepath):
 
     # PyPDF2 结果为空或失败时，回退到 pdfplumber
     try:
-        return _parse_with_pdfplumber(filepath)
+        result = _parse_with_pdfplumber(filepath)
+        if result:
+            return result
     except ImportError:
         pass
     except Exception:
         pass
 
-    # 最后一次尝试 PyPDF2（即使结果少）
-    try:
-        return _parse_with_pypdf2(filepath)
-    except ImportError:
-        raise RuntimeError("PDF解析库未安装（需要 pdfplumber 或 PyPDF2）")
-    except Exception as e:
-        raise RuntimeError(f"PDF解析失败: {e}")
+    # 返回第一次 PyPDF2 的结果（即使是空/少的），避免第三次解析
+    if pypdf2_result is not None:
+        return pypdf2_result
+
+    raise RuntimeError("PDF解析失败: 所有解析器均未能提取有效内容")
 
 
 def _parse_with_pypdf2(filepath):
