@@ -164,7 +164,7 @@ def _extract_ascii_text(data):
     # 尝试用GBK解码
     raw = "\n".join(text_parts)
     try:
-        from .text_utils import decode_bytes
+        from ..text_utils import decode_bytes
         return decode_bytes(raw.encode("latin-1"))
     except Exception:
         return raw
