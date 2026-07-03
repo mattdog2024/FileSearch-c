@@ -1,12 +1,14 @@
-"""预览面板 - 文件信息与内容预览
-现代化深色主题设计 - 精致版
+"""预览面板 - 明亮暖白主题
+PreviewHeader / PreviewBody / PreviewFooter 三段式布局
 """
+import os
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
-    QFrame, QSizePolicy, QGraphicsDropShadowEffect
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
+    QStackedWidget, QTextBrowser, QPushButton, QSizePolicy,
+    QTabWidget, QGridLayout
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtGui import QFont, QColor, QDesktopServices
 
 from core.text_utils import format_file_size
 
@@ -16,312 +18,459 @@ class PreviewPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._current_result = None
         self._setup_ui()
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self.setStyleSheet("QWidget { background-color: #FFFFFF; }")
 
-        # ---- 文件信息卡片 ----
-        self.info_card = QWidget()
-        self.info_card.setObjectName("infoCard")
-        self.info_card.setStyleSheet("""
-            QWidget#infoCard {
-                background-color: #181825;
-                border-radius: 12px;
-                border: 1px solid #313244;
-            }
-        """)
-        # 添加阴影
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(16)
-        shadow.setColor(QColor(0, 0, 0, 40))
-        shadow.setOffset(0, 2)
-        self.info_card.setGraphicsEffect(shadow)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        info_layout = QVBoxLayout(self.info_card)
-        info_layout.setContentsMargins(18, 16, 18, 16)
-        info_layout.setSpacing(10)
+        # ===== PreviewHeader =====
+        self.header = self._build_header()
+        main_layout.addWidget(self.header)
 
-        # 文件名标题
-        self.lbl_filename = QLabel("选择一个文件查看详情")
-        self.lbl_filename.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
-        self.lbl_filename.setStyleSheet("color: #cdd6f4;")
-        self.lbl_filename.setWordWrap(True)
-        info_layout.addWidget(self.lbl_filename)
+        # ===== PreviewBody =====
+        self.body = self._build_body()
+        main_layout.addWidget(self.body, stretch=1)
 
-        # 分隔线
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setStyleSheet("background-color: #313244; max-height: 1px;")
-        info_layout.addWidget(sep1)
-
-        # 文件属性网格
-        attrs_layout = QHBoxLayout()
-        attrs_layout.setSpacing(16)
-
-        # 左侧属性
-        left_attrs = QVBoxLayout()
-        left_attrs.setSpacing(8)
-
-        self.lbl_type = self._make_attr_label("类型", "—")
-        self.lbl_size = self._make_attr_label("大小", "—")
-        left_attrs.addWidget(self.lbl_type)
-        left_attrs.addWidget(self.lbl_size)
-        attrs_layout.addLayout(left_attrs)
-
-        # 右侧属性
-        right_attrs = QVBoxLayout()
-        right_attrs.setSpacing(8)
-
-        self.lbl_time = self._make_attr_label("修改时间", "—")
-        self.lbl_source = self._make_attr_label("来源索引", "—")
-        right_attrs.addWidget(self.lbl_time)
-        right_attrs.addWidget(self.lbl_source)
-        attrs_layout.addLayout(right_attrs)
-
-        info_layout.addLayout(attrs_layout)
-
-        # 文件路径
-        self.lbl_path = QLabel("")
-        self.lbl_path.setStyleSheet("""
-            color: #585b70;
-            font-size: 11px;
-            padding: 4px 0;
-        """)
-        self.lbl_path.setWordWrap(True)
-        info_layout.addWidget(self.lbl_path)
-
-        layout.addWidget(self.info_card)
-        layout.addSpacing(12)
-
-        # ---- 内容预览区 ----
-        preview_header = QWidget()
-        preview_header.setStyleSheet("background-color: transparent;")
-        ph_layout = QHBoxLayout(preview_header)
-        ph_layout.setContentsMargins(4, 0, 4, 8)
-
-        lbl_preview_title = QLabel("内容预览")
-        lbl_preview_title.setStyleSheet("""
-            color: #89b4fa;
-            font-size: 12px;
-            font-weight: 600;
-            padding: 4px 0;
-        """)
-        ph_layout.addWidget(lbl_preview_title)
-        ph_layout.addStretch()
-
-        layout.addWidget(preview_header)
-
-        # 预览文本框
-        self.txt_preview = QTextEdit()
-        self.txt_preview.setReadOnly(True)
-        self.txt_preview.setFont(QFont("Consolas", 10))
-        self.txt_preview.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e2e;
-                border: 1px solid #313244;
-                border-radius: 10px;
-                color: #bac2de;
-                padding: 14px;
-                selection-background-color: #45475a;
-                selection-color: #cdd6f4;
-            }
-        """)
-        layout.addWidget(self.txt_preview, stretch=1)
-
-        # ---- 关键词匹配片段区 ----
-        self.snippet_header = QWidget()
-        self.snippet_header.setStyleSheet("background-color: transparent;")
-        sh_layout = QHBoxLayout(self.snippet_header)
-        sh_layout.setContentsMargins(4, 8, 4, 4)
-
-        lbl_snippet_title = QLabel("匹配片段")
-        lbl_snippet_title.setStyleSheet("""
-            color: #f9e2af;
-            font-size: 12px;
-            font-weight: 600;
-            padding: 4px 0;
-        """)
-        sh_layout.addWidget(lbl_snippet_title)
-        sh_layout.addStretch()
-
-        self.snippet_count_label = QLabel("")
-        self.snippet_count_label.setStyleSheet("color: #585b70; font-size: 11px;")
-        sh_layout.addWidget(self.snippet_count_label)
-
-        layout.addWidget(self.snippet_header)
-
-        self.txt_snippets = QTextEdit()
-        self.txt_snippets.setReadOnly(True)
-        self.txt_snippets.setFont(QFont("Microsoft YaHei", 10))
-        self.txt_snippets.setStyleSheet("""
-            QTextEdit {
-                background-color: #181825;
-                border: 1px solid #313244;
-                border-radius: 10px;
-                color: #bac2de;
-                padding: 12px;
-                selection-background-color: #45475a;
-                selection-color: #cdd6f4;
-            }
-        """)
-        self.txt_snippets.setMaximumHeight(160)
-        layout.addWidget(self.txt_snippets)
-
-        self.snippet_header.setVisible(False)
-        self.txt_snippets.setVisible(False)
+        # ===== PreviewFooter =====
+        self.footer = self._build_footer()
+        main_layout.addWidget(self.footer)
 
         # 初始状态
         self.clear()
 
-    def _make_attr_label(self, key, value):
-        """创建属性标签"""
-        lbl = QLabel(
-            f'<span style="color:#585b70; font-size:11px;">{key}:</span> '
-            f'<span style="color:#a6adc8; font-size:11px;">{value}</span>'
-        )
-        lbl.setTextFormat(Qt.RichText)
-        return lbl
+    def _build_header(self):
+        """构建预览头部"""
+        header = QFrame()
+        header.setStyleSheet("""
+            QFrame {
+                background-color: #FFFFFF;
+                border-bottom: 1px solid #E7E5E4;
+            }
+        """)
 
-    def _update_attr_label(self, label, key, value):
-        """更新属性标签"""
-        label.setText(
-            f'<span style="color:#585b70; font-size:11px;">{key}:</span> '
-            f'<span style="color:#a6adc8; font-size:11px;">{value}</span>'
-        )
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(12)
+
+        # 面包屑
+        self.lbl_breadcrumb = QLabel("")
+        self.lbl_breadcrumb.setTextFormat(Qt.RichText)
+        self.lbl_breadcrumb.setStyleSheet("""
+            QLabel {
+                font-size: 11px;
+                font-family: "Consolas", "JetBrains Mono", monospace;
+                color: #A8A29E;
+                background: transparent;
+            }
+        """)
+        layout.addWidget(self.lbl_breadcrumb)
+
+        # 标题行
+        title_row = QHBoxLayout()
+        title_row.setSpacing(12)
+
+        self.lbl_title = QLabel("选择一个文件查看详情")
+        self.lbl_title.setStyleSheet("""
+            QLabel {
+                font-size: 22px;
+                font-weight: 700;
+                color: #1C1917;
+                background: transparent;
+            }
+        """)
+        self.lbl_title.setWordWrap(True)
+        title_row.addWidget(self.lbl_title, stretch=1)
+
+        # 操作按钮组
+        btn_group = QVBoxLayout()
+        btn_group.setSpacing(6)
+
+        self.btn_open = QPushButton("打开文件")
+        self.btn_open.setObjectName("primaryBtn")
+        self.btn_open.setFixedHeight(30)
+        self.btn_open.setCursor(Qt.PointingHandCursor)
+        self.btn_open.clicked.connect(self._open_file)
+        self.btn_open.setEnabled(False)
+        btn_group.addWidget(self.btn_open)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        self.btn_locate = QPushButton("定位")
+        self.btn_locate.setFixedHeight(30)
+        self.btn_locate.setCursor(Qt.PointingHandCursor)
+        self.btn_locate.clicked.connect(self._locate_file)
+        self.btn_locate.setEnabled(False)
+        btn_row.addWidget(self.btn_locate)
+
+        self.btn_copy_path = QPushButton("复制路径")
+        self.btn_copy_path.setFixedHeight(30)
+        self.btn_copy_path.setCursor(Qt.PointingHandCursor)
+        self.btn_copy_path.clicked.connect(self._copy_path)
+        self.btn_copy_path.setEnabled(False)
+        btn_row.addWidget(self.btn_copy_path)
+
+        btn_group.addLayout(btn_row)
+        title_row.addLayout(btn_group)
+
+        layout.addLayout(title_row)
+
+        # 元信息区（4列）
+        meta_grid = QHBoxLayout()
+        meta_grid.setSpacing(28)
+
+        self.meta_type = self._build_meta_cell("类型", "—")
+        self.meta_size = self._build_meta_cell("大小", "—")
+        self.meta_time = self._build_meta_cell("修改时间", "—")
+        self.meta_path = self._build_meta_cell("路径", "—", mono=True)
+
+        meta_grid.addWidget(self.meta_type["widget"])
+        meta_grid.addWidget(self.meta_size["widget"])
+        meta_grid.addWidget(self.meta_time["widget"])
+        meta_grid.addWidget(self.meta_path["widget"])
+
+        layout.addLayout(meta_grid)
+
+        return header
+
+    def _build_meta_cell(self, key, value, mono=False):
+        """构建元信息单元格"""
+        widget = QWidget()
+        widget.setStyleSheet("QWidget { background: transparent; }")
+        v_layout = QVBoxLayout(widget)
+        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setSpacing(2)
+
+        lbl_key = QLabel(key.upper())
+        lbl_key.setStyleSheet("""
+            QLabel {
+                font-size: 10px;
+                font-weight: 600;
+                color: #A8A29E;
+                background: transparent;
+            }
+        """)
+        v_layout.addWidget(lbl_key)
+
+        font_family = '"Consolas", "JetBrains Mono", monospace' if mono else '"Microsoft YaHei UI", sans-serif'
+        font_size = "12px" if mono else "13px"
+        lbl_value = QLabel(value)
+        lbl_value.setStyleSheet(f"""
+            QLabel {{
+                font-size: {font_size};
+                font-weight: 500;
+                color: #1C1917;
+                font-family: {font_family};
+                background: transparent;
+            }}
+        """)
+        lbl_value.setWordWrap(True)
+        v_layout.addWidget(lbl_value)
+
+        return {"widget": widget, "key": lbl_key, "value": lbl_value}
+
+    def _build_body(self):
+        """构建预览主体"""
+        body = QWidget()
+        body.setStyleSheet("QWidget { background-color: #FFFFFF; }")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(24, 24, 24, 28)
+        layout.setSpacing(0)
+
+        # Tabs
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background-color: #FFFFFF;
+            }
+            QTabBar::tab {
+                background-color: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+                padding: 10px 12px 12px;
+                margin-right: 4px;
+                color: #A8A29E;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QTabBar::tab:selected {
+                color: #1C1917;
+                font-weight: 600;
+                border-bottom: 2px solid #4F46E5;
+            }
+            QTabBar::tab:hover {
+                color: #57534E;
+            }
+        """)
+
+        # 内容预览（富文本）
+        self.txt_preview = QTextBrowser()
+        self.txt_preview.setOpenExternalLinks(False)
+        self.txt_preview.setStyleSheet("""
+            QTextBrowser {
+                background-color: #FFFFFF;
+                border: none;
+                color: #1C1917;
+                font-size: 13.5px;
+                line-height: 1.75;
+                padding: 0;
+            }
+        """)
+        self.tab_widget.addTab(self.txt_preview, "内容预览")
+
+        # 匹配片段
+        self.txt_snippets = QTextBrowser()
+        self.txt_snippets.setStyleSheet("""
+            QTextBrowser {
+                background-color: #FFFFFF;
+                border: none;
+                color: #1C1917;
+                font-size: 13px;
+                line-height: 1.55;
+                padding: 0;
+            }
+        """)
+        self.tab_widget.addTab(self.txt_snippets, "匹配片段")
+
+        layout.addWidget(self.tab_widget, stretch=1)
+
+        return body
+
+    def _build_footer(self):
+        """构建预览底部"""
+        footer = QFrame()
+        footer.setStyleSheet("""
+            QFrame {
+                background-color: #F5F5F4;
+                border-top: 1px solid #E7E5E4;
+            }
+        """)
+
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(24, 12, 24, 12)
+
+        # 左侧：编码信息
+        self.lbl_footer_info = QLabel("UTF-8")
+        self.lbl_footer_info.setStyleSheet("""
+            QLabel {
+                font-size: 11px;
+                font-family: "Consolas", "JetBrains Mono", monospace;
+                color: #A8A29E;
+                background: transparent;
+            }
+        """)
+        layout.addWidget(self.lbl_footer_info)
+
+        layout.addStretch()
+
+        # 右侧：来源 tag
+        source_container = QHBoxLayout()
+        source_container.setSpacing(6)
+
+        lbl_source_label = QLabel("来源：")
+        lbl_source_label.setStyleSheet("""
+            QLabel {
+                font-size: 11px;
+                color: #A8A29E;
+                background: transparent;
+            }
+        """)
+        source_container.addWidget(lbl_source_label)
+
+        # 绿点
+        self.lbl_status_dot = QLabel("●")
+        self.lbl_status_dot.setStyleSheet("""
+            QLabel {
+                font-size: 6px;
+                color: #059669;
+                background: transparent;
+            }
+        """)
+        source_container.addWidget(self.lbl_status_dot)
+
+        # 来源名
+        self.lbl_source_tag = QLabel("—")
+        self.lbl_source_tag.setStyleSheet("""
+            QLabel {
+                background-color: #FFFFFF;
+                border: 1px solid #E7E5E4;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+                font-family: "Consolas", "JetBrains Mono", monospace;
+                color: #57534E;
+            }
+        """)
+        source_container.addWidget(self.lbl_source_tag)
+
+        layout.addLayout(source_container)
+
+        return footer
 
     def show_file(self, result, keywords=None):
-        """显示文件信息和内容预览
+        """显示文件信息和内容预览"""
+        self._current_result = result
 
-        result: SearchResult 对象（自带 root_path、db_path）
-        keywords: 搜索关键词列表
-        """
-        # 文件名
-        self.lbl_filename.setText(result.filename)
+        # 面包屑
+        path_parts = result.relative_path.replace('\\', '/').split('/')
+        breadcrumb_parts = [f'<span style="color:#A8A29E;">{p}</span>' for p in path_parts[:-1]]
+        breadcrumb_parts.append(f'<span style="color:#57534E;font-weight:500;">{path_parts[-1]}</span>' if path_parts else '')
+        self.lbl_breadcrumb.setText(' <span style="color:rgba(168,162,158,0.5);">/</span> '.join(breadcrumb_parts))
 
-        # 属性
+        # 标题
+        self.lbl_title.setText(result.filename)
+
+        # 元信息
         ext_display = result.extension.upper().replace(".", "") if result.extension else "未知"
-        self._update_attr_label(self.lbl_type, "类型", ext_display)
-        self._update_attr_label(self.lbl_size, "大小", result.file_size_str)
-        self._update_attr_label(self.lbl_time, "修改时间", result.modified_time_str)
+        self.meta_type["value"].setText(ext_display)
+        self.meta_size["value"].setText(result.file_size_str)
+        self.meta_time["value"].setText(result.modified_time_str)
+        self.meta_path["value"].setText(result.relative_path)
 
-        # 来源索引
-        source = "—"
-        if hasattr(result, 'db_path') and result.db_path:
-            import os
-            source = os.path.basename(result.db_path)
-        self._update_attr_label(self.lbl_source, "来源索引", source)
-
-        # 路径
-        full_path = result.full_path
-        self.lbl_path.setText(full_path)
-
-        # 可用性标记
-        if result.is_available:
-            self.lbl_path.setStyleSheet("""
-                color: #a6e3a1;
-                font-size: 11px;
-                padding: 4px 0;
-            """)
-        else:
-            self.lbl_path.setStyleSheet("""
-                color: #f38ba8;
-                font-size: 11px;
-                padding: 4px 0;
-            """)
+        # 按钮
+        self.btn_open.setEnabled(True)
+        self.btn_locate.setEnabled(True)
+        self.btn_copy_path.setEnabled(True)
 
         # 内容预览
         content = result.content or ""
         if content:
-            # 截取前 2000 字符显示
-            preview_text = content[:2000]
-            if len(content) > 2000:
-                preview_text += "\n\n... (共 {} 字符，仅显示前 2000)".format(len(content))
-            self.txt_preview.setPlainText(preview_text)
-            self.txt_preview.setStyleSheet("""
-                QTextEdit {
-                    background-color: #1e1e2e;
-                    border: 1px solid #313244;
-                    border-radius: 10px;
-                    color: #bac2de;
-                    padding: 14px;
-                    selection-background-color: #45475a;
-                    selection-color: #cdd6f4;
-                }
-            """)
-        else:
-            self.txt_preview.setPlainText("(无内容预览)")
-            self.txt_preview.setStyleSheet("""
-                QTextEdit {
-                    background-color: #1e1e2e;
-                    border: 1px solid #313244;
-                    border-radius: 10px;
-                    color: #585b70;
-                    padding: 14px;
-                }
-            """)
+            # 高亮关键词
+            preview_html = content[:3000]
+            preview_html = preview_html.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            preview_html = preview_html.replace("\n", "<br>")
 
-        # 关键词匹配片段
+            if keywords:
+                for kw in keywords:
+                    kw_escaped = kw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    preview_html = preview_html.replace(
+                        kw_escaped,
+                        f'<span style="background:#FEF3C7;color:#78350F;padding:1px 3px;border-radius:3px;font-weight:500;">{kw_escaped}</span>'
+                    )
+
+            self.txt_preview.setHtml(
+                f'<div style="max-width:720px;font-size:13.5px;line-height:1.75;color:#1C1917;">'
+                f'{preview_html}'
+                f'</div>'
+            )
+        else:
+            self.txt_preview.setHtml(
+                '<div style="color:#A8A29E;font-size:13px;padding:20px;">'
+                '（无内容预览）</div>'
+            )
+
+        # 匹配片段
         if keywords and content:
             snippets = result.get_snippets(keywords)
-            if snippets and snippets[0][1]:  # 有匹配
-                self._show_snippets(snippets)
+            if snippets and snippets[0][1]:
+                self._show_snippets(snippets, keywords)
+                self.tab_widget.setTabText(1, f"匹配片段 ({len(snippets)})")
             else:
-                self.snippet_header.setVisible(False)
-                self.txt_snippets.setVisible(False)
+                self.txt_snippets.setHtml(
+                    '<div style="color:#A8A29E;font-size:13px;padding:20px;">'
+                    '（无匹配片段）</div>'
+                )
+                self.tab_widget.setTabText(1, "匹配片段")
         else:
-            self.snippet_header.setVisible(False)
-            self.txt_snippets.setVisible(False)
+            self.txt_snippets.setHtml(
+                '<div style="color:#A8A29E;font-size:13px;padding:20px;">'
+                '（无匹配片段）</div>'
+            )
+            self.tab_widget.setTabText(1, "匹配片段")
 
-    def _show_snippets(self, snippets):
-        """显示关键词匹配片段（HTML 高亮）"""
-        self.snippet_header.setVisible(True)
-        self.txt_snippets.setVisible(True)
-        self.snippet_count_label.setText(f"{len(snippets)} 处匹配")
+        # 默认显示内容预览
+        self.tab_widget.setCurrentIndex(0)
 
+        # Footer
+        self.lbl_footer_info.setText(f"UTF-8  ·  {result.file_size_str}")
+        source_name = "—"
+        if hasattr(result, 'source_name') and result.source_name:
+            source_name = result.source_name
+        elif hasattr(result, 'db_path') and result.db_path:
+            source_name = os.path.basename(result.db_path)
+        self.lbl_source_tag.setText(source_name)
+
+    def _show_snippets(self, snippets, keywords=None):
+        """显示关键词匹配片段"""
         html_parts = []
         for snippet, matches in snippets:
-            # 转义 HTML
             escaped = snippet.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-            # 高亮匹配（从后往前替换避免偏移）
+            # 高亮匹配
             for start, end in reversed(matches):
                 before = escaped[:start]
                 matched = escaped[start:end]
                 after = escaped[end:]
                 escaped = (
-                    f'{before}<span style="background-color:#f9e2af; color:#1e1e2e; '
-                    f'border-radius:3px; padding:1px 3px; font-weight:bold;">{matched}</span>{after}'
+                    f'{before}<span style="background:#FEF3C7;color:#78350F;'
+                    f'padding:1px 3px;border-radius:3px;font-weight:500;'
+                    f'box-shadow:0 0 0 2px #FEF3C7;">{matched}</span>{after}'
                 )
 
             html_parts.append(
-                f'<div style="margin-bottom:8px; padding:8px 10px; '
-                f'background-color:#313244; border-radius:8px; '
-                f'font-size:12px; line-height:1.5;">'
+                f'<div style="margin-bottom:10px;padding:10px 12px;'
+                f'background:#F5F5F4;border-radius:8px;'
+                f'font-size:12px;line-height:1.55;color:#57534E;">'
                 f'{escaped}</div>'
             )
 
         self.txt_snippets.setHtml("".join(html_parts))
 
+    def _open_file(self):
+        """打开文件"""
+        if not self._current_result:
+            return
+        full_path = self._current_result.full_path
+        if os.path.exists(full_path):
+            import subprocess, sys
+            if sys.platform == "win32":
+                os.startfile(full_path)
+            else:
+                subprocess.Popen(["xdg-open", full_path])
+
+    def _locate_file(self):
+        """定位到文件所在文件夹"""
+        if not self._current_result:
+            return
+        full_path = self._current_result.full_path
+        folder = os.path.dirname(full_path)
+        if os.path.exists(folder):
+            import subprocess, sys
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", full_path])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+
+    def _copy_path(self):
+        """复制路径到剪贴板"""
+        if not self._current_result:
+            return
+        from PyQt5.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self._current_result.full_path)
+
     def clear(self):
         """清空预览"""
-        self.lbl_filename.setText("选择一个文件查看详情")
-        self._update_attr_label(self.lbl_type, "类型", "—")
-        self._update_attr_label(self.lbl_size, "大小", "—")
-        self._update_attr_label(self.lbl_time, "修改时间", "—")
-        self._update_attr_label(self.lbl_source, "来源索引", "—")
-        self.lbl_path.setText("")
-        self.txt_preview.setPlainText("")
-        self.txt_preview.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e2e;
-                border: 1px solid #313244;
-                border-radius: 10px;
-                color: #585b70;
-                padding: 14px;
-            }
-        """)
-        self.snippet_header.setVisible(False)
-        self.txt_snippets.setVisible(False)
+        self._current_result = None
+        self.lbl_breadcrumb.setText("")
+        self.lbl_title.setText("选择一个文件查看详情")
+        self.meta_type["value"].setText("—")
+        self.meta_size["value"].setText("—")
+        self.meta_time["value"].setText("—")
+        self.meta_path["value"].setText("—")
+        self.btn_open.setEnabled(False)
+        self.btn_locate.setEnabled(False)
+        self.btn_copy_path.setEnabled(False)
+        self.txt_preview.setHtml(
+            '<div style="color:#A8A29E;font-size:13px;padding:40px;text-align:center;">'
+            '选择一个文件以预览内容</div>'
+        )
+        self.txt_snippets.setHtml("")
+        self.lbl_footer_info.setText("")
+        self.lbl_source_tag.setText("—")
