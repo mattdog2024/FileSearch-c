@@ -1,0 +1,79 @@
+name: Build & Release EXE
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (如 2.0.0)'
+        required: true
+        default: '2.0.0'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push: extract version from tag (v2.0.0 -> 2.0.0)
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            # Manual dispatch: use input
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller filesearch.spec --clean --noconfirm
+
+      - name: Rename EXE with version
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cp dist/FileSearch.exe "dist/FileSearch-v${VERSION}.exe"
+          ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: FileSearch v${{ steps.version.outputs.version }}
+          body: |
+            ## FileSearch v${{ steps.version.outputs.version }}
+
+            ### 更新内容
+            - 🚀 性能大幅优化：FTS5 contentless 模式、jieba 分词搜索、os.scandir 递归扫描
+            - 🎨 全新 UI：Catppuccin 深色主题、卡片式布局、现代化设计
+            - 📦 多索引支持：可同时加载多个索引进行搜索
+            - 🔧 Bug 修复：多索引 root_path 问题、编码检测优化
+
+            ### 使用说明
+            1. 下载 `FileSearch-v${{ steps.version.outputs.version }}.exe`
+            2. 双击运行即可使用
+            3. 首次使用请先点击「索引管理」创建索引
+          files: |
+            dist/FileSearch-v${{ steps.version.outputs.version }}.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
