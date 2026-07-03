@@ -1,5 +1,5 @@
 """主窗口 - 现代化搜索界面
-深色主题 + 卡片式布局 + 多索引支持
+深色主题 + 卡片式布局 + 多索引支持 - 精致版
 """
 import os
 import sys
@@ -61,16 +61,21 @@ class MainWindow(QMainWindow):
         central.setObjectName("centralWidget")
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(16, 12, 16, 8)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(20, 16, 20, 12)
+        main_layout.setSpacing(12)
 
         # ---- 顶部标题栏 ----
         header_layout = QHBoxLayout()
 
-        title_label = QLabel("🔍 FileSearch")
+        title_label = QLabel("FileSearch")
         title_label.setObjectName("appTitle")
-        title_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
-        title_label.setStyleSheet("color: #89b4fa;")
+        title_label.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        title_label.setStyleSheet("""
+            QLabel {
+                color: #89b4fa;
+                padding: 4px 0;
+            }
+        """)
         header_layout.addWidget(title_label)
 
         header_layout.addStretch()
@@ -82,16 +87,19 @@ class MainWindow(QMainWindow):
             QLabel {
                 background-color: #313244;
                 color: #a6adc8;
-                border-radius: 12px;
-                padding: 4px 14px;
+                border-radius: 14px;
+                padding: 6px 16px;
                 font-size: 12px;
+                font-weight: 500;
             }
         """)
         header_layout.addWidget(self.lbl_index_badge)
 
         # 索引管理按钮
-        self.btn_index = QPushButton("📁 索引管理")
+        self.btn_index = QPushButton("索引管理")
         self.btn_index.setObjectName("primaryBtn")
+        self.btn_index.setMinimumHeight(38)
+        self.btn_index.setMinimumWidth(110)
         self.btn_index.setCursor(Qt.PointingHandCursor)
         self.btn_index.clicked.connect(self._open_index_dialog)
         header_layout.addWidget(self.btn_index)
@@ -104,17 +112,24 @@ class MainWindow(QMainWindow):
         search_container.setStyleSheet("""
             QWidget#searchContainer {
                 background-color: #181825;
-                border-radius: 12px;
-                padding: 4px;
+                border-radius: 14px;
+                padding: 6px;
             }
         """)
+        # 添加阴影
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setOffset(0, 3)
+        search_container.setGraphicsEffect(shadow)
+
         search_layout = QHBoxLayout(search_container)
-        search_layout.setContentsMargins(8, 4, 8, 4)
-        search_layout.setSpacing(8)
+        search_layout.setContentsMargins(12, 6, 12, 6)
+        search_layout.setSpacing(10)
 
         # 搜索图标
         search_icon = QLabel("🔎")
-        search_icon.setStyleSheet("font-size: 18px; color: #585b70;")
+        search_icon.setStyleSheet("font-size: 20px; color: #585b70;")
         search_layout.addWidget(search_icon)
 
         self.txt_search = QLineEdit()
@@ -125,7 +140,11 @@ class MainWindow(QMainWindow):
                 background-color: transparent;
                 border: none;
                 color: #cdd6f4;
-                padding: 6px 4px;
+                padding: 8px 6px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                outline: none;
             }
         """)
         self.txt_search.textChanged.connect(self._on_search_changed)
@@ -137,6 +156,34 @@ class MainWindow(QMainWindow):
         self.cmb_ext_filter.addItem("全部类型", "all")
         for ext in [".doc", ".docx", ".xls", ".xlsx", ".pdf", ".ppt", ".pptx"]:
             self.cmb_ext_filter.addItem(ext.upper(), ext)
+        self.cmb_ext_filter.setMinimumHeight(36)
+        self.cmb_ext_filter.setMinimumWidth(110)
+        self.cmb_ext_filter.setStyleSheet("""
+            QComboBox {
+                background-color: #1e1e2e;
+                border: 1px solid #313244;
+                border-radius: 8px;
+                color: #cdd6f4;
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #585b70;
+            }
+            QComboBox:focus {
+                border-color: #89b4fa;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e2e;
+                border: 1px solid #313244;
+                color: #cdd6f4;
+                selection-background-color: #313244;
+            }
+        """)
         self.cmb_ext_filter.currentIndexChanged.connect(self._on_filter_changed)
         search_layout.addWidget(self.cmb_ext_filter)
 
@@ -146,6 +193,34 @@ class MainWindow(QMainWindow):
         self.cmb_sort.addItem("时间", "time")
         self.cmb_sort.addItem("大小", "size")
         self.cmb_sort.addItem("名称", "name")
+        self.cmb_sort.setMinimumHeight(36)
+        self.cmb_sort.setMinimumWidth(100)
+        self.cmb_sort.setStyleSheet("""
+            QComboBox {
+                background-color: #1e1e2e;
+                border: 1px solid #313244;
+                border-radius: 8px;
+                color: #cdd6f4;
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #585b70;
+            }
+            QComboBox:focus {
+                border-color: #89b4fa;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e2e;
+                border: 1px solid #313244;
+                color: #cdd6f4;
+                selection-background-color: #313244;
+            }
+        """)
         self.cmb_sort.currentIndexChanged.connect(self._on_filter_changed)
         search_layout.addWidget(self.cmb_sort)
 
@@ -155,13 +230,25 @@ class MainWindow(QMainWindow):
         stats_layout = QHBoxLayout()
 
         self.lbl_result_count = QLabel("")
-        self.lbl_result_count.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        self.lbl_result_count.setStyleSheet("""
+            QLabel {
+                color: #a6adc8;
+                font-size: 12px;
+                padding: 4px 0;
+            }
+        """)
         stats_layout.addWidget(self.lbl_result_count)
 
         stats_layout.addStretch()
 
         self.lbl_index_detail = QLabel("")
-        self.lbl_index_detail.setStyleSheet("color: #585b70; font-size: 11px;")
+        self.lbl_index_detail.setStyleSheet("""
+            QLabel {
+                color: #585b70;
+                font-size: 11px;
+                padding: 4px 0;
+            }
+        """)
         stats_layout.addWidget(self.lbl_index_detail)
 
         main_layout.addLayout(stats_layout)
@@ -169,7 +256,7 @@ class MainWindow(QMainWindow):
         # ---- 主内容区（分割器）----
         splitter = QSplitter(Qt.Horizontal)
 
-        # 左侧: 结果列表
+        # 左侧：结果列表
         table_container = QWidget()
         table_layout = QVBoxLayout(table_container)
         table_layout.setContentsMargins(0, 0, 0, 0)
@@ -190,11 +277,50 @@ class MainWindow(QMainWindow):
         self.result_table.setShowGrid(False)
         self.result_table.itemSelectionChanged.connect(self._on_selection_changed)
         self.result_table.cellDoubleClicked.connect(self._on_double_click)
+        self.result_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #181825;
+                border: 1px solid #313244;
+                border-radius: 12px;
+                color: #cdd6f4;
+                font-size: 12px;
+                gridline-color: #313244;
+            }
+            QTableWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #313244;
+            }
+            QTableWidget::item:selected {
+                background-color: #313244;
+            }
+            QHeaderView::section {
+                background-color: #1e1e2e;
+                color: #a6adc8;
+                border: none;
+                border-bottom: 2px solid #313244;
+                padding: 10px 8px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QTableWidget QScrollBar:vertical {
+                background-color: #1e1e2e;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QTableWidget QScrollBar::handle:vertical {
+                background-color: #585b70;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QTableWidget QScrollBar::handle:vertical:hover {
+                background-color: #89b4fa;
+            }
+        """)
         table_layout.addWidget(self.result_table)
 
         splitter.addWidget(table_container)
 
-        # 右侧: 预览面板
+        # 右侧：预览面板
         self.preview_panel = PreviewPanel()
         self.preview_panel.setMinimumWidth(320)
         splitter.addWidget(self.preview_panel)
@@ -327,7 +453,7 @@ class MainWindow(QMainWindow):
             self.search_history = self.search_history[:20]
 
         if not self.search_engine.databases:
-            self.lbl_result_count.setText("⚠️ 请先加载索引")
+            self.lbl_result_count.setText("⚠ 请先加载索引")
             self.result_table.setRowCount(0)
             self.current_results = []
             return
@@ -418,7 +544,7 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(
                 self, "文件不可用",
-                f"文件所在硬盘可能未连接。\n\n路径: {full_path}\n\n"
+                f"文件所在硬盘可能未连接。\n\n路径：{full_path}\n\n"
                 f"索引中保存的内容仍可在右侧预览面板查看。"
             )
 
@@ -440,14 +566,15 @@ class MainWindow(QMainWindow):
         """更新索引信息状态"""
         indexes = self.search_engine.get_loaded_indexes()
         if not indexes:
-            self.lbl_index_badge.setText("⚠️ 未加载索引")
+            self.lbl_index_badge.setText("⚠ 未加载索引")
             self.lbl_index_badge.setStyleSheet("""
                 QLabel {
                     background-color: #45475a;
                     color: #f38ba8;
-                    border-radius: 12px;
-                    padding: 4px 14px;
+                    border-radius: 14px;
+                    padding: 6px 16px;
                     font-size: 12px;
+                    font-weight: 500;
                 }
             """)
             self.lbl_index_detail.setText("")
@@ -457,18 +584,19 @@ class MainWindow(QMainWindow):
         total_size = sum(idx["index_size"] for idx in indexes)
         names = [idx["label"] for idx in indexes]
 
-        self.lbl_index_badge.setText(f"✅ {len(indexes)} 个索引 · {total_files} 文件")
+        self.lbl_index_badge.setText(f"✓ {len(indexes)} 个索引 · {total_files} 文件")
         self.lbl_index_badge.setStyleSheet("""
             QLabel {
                 background-color: #313244;
                 color: #a6e3a1;
-                border-radius: 12px;
-                padding: 4px 14px;
+                border-radius: 14px;
+                padding: 6px 16px;
                 font-size: 12px;
+                font-weight: 500;
             }
         """)
         self.lbl_index_detail.setText(
-            f"{', '.join(names)} · 索引大小: {format_file_size(total_size)}"
+            f"{', '.join(names)} · 索引大小：{format_file_size(total_size)}"
         )
 
     # ---- 系统托盘 ----
