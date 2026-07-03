@@ -1,8 +1,9 @@
-"""索引引擎 - 扫描文件、解析内容、构建索引（极速版）
+"""索引引擎 - 扫描文件、解析内容、构建索引（极速版 v2）
 优化：
-- os.scandir 替代 os.walk（机械硬盘快 3-5x）
-- 批量 stat 减少系统调用
-- 自适应线程数（按 CPU 核心）
+- os.scandir + stat 缓存（避免重复系统调用）
+- jieba 分词移入 worker 线程（主线程不再阻塞）
+- 批量 FTS 删除（单事务 executemany）
+- 自适应线程数
 - 单事务批量写入
 - contentless FTS5 + 独立内容存储
 """
@@ -28,8 +29,6 @@ def _get_optimal_workers():
         cpu_count = os.cpu_count() or 2
     except Exception:
         cpu_count = 2
-    # 机械硬盘场景：I/O 密集，线程数可以多一些
-    # 但太多线程反而增加寻道开销，4-8 是最佳区间
     return min(max(cpu_count, 4), 8)
 
 MAX_WORKERS = _get_optimal_workers()
@@ -104,16 +103,17 @@ class IndexerWorker(QObject):
         except Exception:
             pass
 
-        # 阶段1: 扫描文件（使用 os.scandir 替代 os.walk）
+        # 阶段1: 扫描文件（使用 os.scandir + stat 缓存）
         self.phase_changed.emit("scanning")
         self.log_message.emit(f"正在扫描目录: {self.root_path}")
-        all_files = self._scan_files()
+        # file_infos: {filepath: (rel_path, filename, ext, file_size, mtime)}
+        file_infos = self._scan_files()
 
         if self._cancelled:
             db.close()
             return
 
-        total = len(all_files)
+        total = len(file_infos)
         self.log_message.emit(f"找到 {total} 个文件")
 
         if total == 0:
@@ -128,7 +128,7 @@ class IndexerWorker(QObject):
         if self.is_incremental and not is_new:
             existing_files = db.get_all_indexed_files_dict()
 
-        # 阶段2: 解析文件内容（多线程）
+        # 阶段2: 解析文件内容 + 分词（全部在 worker 线程完成）
         self.phase_changed.emit("parsing")
         new_count = 0
         updated_count = 0
@@ -140,29 +140,21 @@ class IndexerWorker(QObject):
         batch_content = []  # [(file_id, content)]
         batch_fts = []  # [(rowid, filename_tokens, content_tokens)]
         batch_update = []  # [(size, mtime, index_time, file_id)]
-        batch_size = 200  # 增大批量大小
+        batch_update_fts_delete = []  # [(old_id,)] 批量删除 FTS
+        batch_update_content = []  # [(file_id, content)] 更新的内容
+        batch_update_fts_insert = []  # [(rowid, filename_tokens, content_tokens)]
+        batch_size = 200
 
-        # 使用线程池并行解析
-        workers = min(MAX_WORKERS, max(1, total // 10))  # 小文件集不用太多线程
+        # 使用线程池并行解析 + 分词
+        workers = min(MAX_WORKERS, max(1, total // 10))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             # 提交所有任务
             future_to_file = {}
-            for i, filepath in enumerate(all_files):
+            for i, (filepath, info) in enumerate(file_infos.items()):
                 if self._cancelled:
                     break
 
-                rel_path = os.path.relpath(filepath, self.root_path)
-                filename = os.path.basename(filepath)
-                ext = os.path.splitext(filepath)[1].lower()
-
-                # 使用 os.scandir 返回的 stat 信息（已在扫描阶段缓存）
-                try:
-                    stat = os.stat(filepath)
-                    file_size = stat.st_size
-                    mtime = stat.st_mtime
-                except OSError:
-                    skipped_count += 1
-                    continue
+                rel_path, filename, ext, file_size, mtime = info
 
                 # 检查是否需要跳过（增量索引）
                 if rel_path in existing_files:
@@ -170,37 +162,36 @@ class IndexerWorker(QObject):
                     if old_size == file_size and abs(old_mtime - mtime) < 1:
                         skipped_count += 1
                         del existing_files[rel_path]
-                        self.progress.emit(i + 1, total, filename)
                         continue
 
                 # 检查文件大小
                 if file_size > MAX_FILE_SIZE:
                     self.log_message.emit(f"跳过大文件 ({file_size // 1024 // 1024}MB): {filename}")
                     skipped_count += 1
-                    self.progress.emit(i + 1, total, filename)
                     continue
 
-                # 提交解析任务
-                future = executor.submit(self._parse_single_file, filepath, ext, filename)
+                # 提交解析+分词任务（全部在 worker 线程完成）
+                future = executor.submit(
+                    self._parse_and_tokenize, filepath, ext, filename
+                )
                 future_to_file[future] = (i, filepath, rel_path, filename, ext, file_size, mtime)
 
             # 处理完成的任务
+            processed_count = 0
             for future in as_completed(future_to_file):
                 if self._cancelled:
                     break
 
                 i, filepath, rel_path, filename, ext, file_size, mtime = future_to_file[future]
+                processed_count += 1
 
                 try:
-                    content = future.result()
+                    # result 现在包含 (content, filename_tokens, content_tokens)
+                    content, filename_tokens, content_tokens = future.result()
                 except Exception as e:
                     error_count += 1
                     logger.debug(f"解析失败 {filename}: {e}")
-                    content = ""
-
-                # 分词文件名和内容
-                filename_tokens = tokenize_filename(filename)
-                content_tokens = tokenize_content(content) if content else ""
+                    content, filename_tokens, content_tokens = "", "", ""
 
                 now = time.time()
 
@@ -208,34 +199,33 @@ class IndexerWorker(QObject):
                 if rel_path in existing_files:
                     old_id, old_size, old_mtime = existing_files[rel_path]
                     batch_update.append((file_size, mtime, now, old_id))
-                    # 更新内容
                     if content:
-                        batch_content.append((old_id, content))
-                    # FTS 更新：先删后插
-                    db.delete_fts(old_id)
-                    batch_fts.append((old_id, filename_tokens, content_tokens))
+                        batch_update_content.append((old_id, content))
+                    # FTS 删除收集起来批处理
+                    batch_update_fts_delete.append((old_id,))
+                    batch_update_fts_insert.append((old_id, filename_tokens, content_tokens))
                     updated_count += 1
                     del existing_files[rel_path]
                 else:
                     batch_new.append((rel_path, filename, ext, file_size, mtime, now))
-                    # 内容先存占位，等拿到 file_id 再存
                     batch_content.append((None, content))  # None 表示待填充
+                    batch_fts.append((None, filename_tokens, content_tokens))
 
                     if len(batch_new) >= batch_size:
-                        ids = self._flush_batch(db, batch_new, batch_content, batch_fts)
+                        self._flush_batch(db, batch_new, batch_content, batch_fts)
                         new_count += len(batch_new)
                         batch_new = []
                         batch_content = []
                         batch_fts = []
 
-                # 节流进度更新（最多每200ms一次）
+                # 节流进度更新
                 now_time = time.time()
                 if now_time - self._last_progress_time > 0.2:
-                    self.progress.emit(i + 1, total, filename)
+                    self.progress.emit(processed_count + skipped_count, total, filename)
                     self._last_progress_time = now_time
 
                 # 每200个文件显示一次详细进度
-                if (i + 1) % 200 == 0:
+                if processed_count % 200 == 0:
                     elapsed = time.time() - self._start_time
                     processed = new_count + updated_count + skipped_count
                     if processed > 0:
@@ -243,22 +233,22 @@ class IndexerWorker(QObject):
                         remaining = (total - processed) * avg_time
                         eta_str = self._format_eta(remaining)
                         self.log_message.emit(
-                            f"进度: {i + 1}/{total} | 新增: {new_count} | 更新: {updated_count} | "
+                            f"进度: {processed_count + skipped_count}/{total} | "
+                            f"新增: {new_count} | 更新: {updated_count} | "
                             f"跳过: {skipped_count} | 预计剩余: {eta_str}"
                         )
 
-        # 刷新剩余批次
+        # 刷新剩余新文件批次
         if batch_new:
-            ids = self._flush_batch(db, batch_new, batch_content, batch_fts)
+            self._flush_batch(db, batch_new, batch_content, batch_fts)
             new_count += len(batch_new)
 
-        # 刷新更新批次
+        # 刷新更新批次（全部在一个事务中）
         if batch_update:
-            with db.transaction():
-                db.batch_update_files(batch_update)
-                if batch_content:
-                    db.batch_insert_contents(batch_content)
-                db.batch_insert_fts(batch_fts)
+            self._flush_update_batch(
+                db, batch_update, batch_update_content,
+                batch_update_fts_delete, batch_update_fts_insert
+            )
 
         # 标记不再存在的文件为无效
         if self.is_incremental and existing_files:
@@ -279,40 +269,42 @@ class IndexerWorker(QObject):
         self.phase_changed.emit("done")
         self.finished.emit(total, new_count, updated_count)
 
-    def _parse_single_file(self, filepath, ext, filename):
-        """解析单个文件（可并行执行）"""
-        try:
-            content = parse_file(filepath, ext)
-            return clean_text(content)
-        except Exception as e:
-            logger.debug(f"解析失败 {filename}: {e}")
-            return ""
-
-    def _flush_batch(self, db, batch_new, batch_content, batch_fts):
-        """批量写入新文件记录
-        返回: 插入的 file_id 列表
+    def _parse_and_tokenize(self, filepath, ext, filename):
+        """解析单个文件 + 分词（在 worker 线程中执行）
+        返回: (content, filename_tokens, content_tokens)
         """
         try:
+            # parse_file 返回 (text, error_msg) 元组
+            content, _ = parse_file(filepath, ext)
+            content = clean_text(content)
+        except Exception as e:
+            logger.debug(f"解析失败 {filename}: {e}")
+            content = ""
+
+        # 分词也在 worker 线程完成，不阻塞主线程
+        filename_tokens = tokenize_filename(filename)
+        content_tokens = tokenize_content(content) if content else ""
+
+        return content, filename_tokens, content_tokens
+
+    def _flush_batch(self, db, batch_new, batch_content, batch_fts):
+        """批量写入新文件记录"""
+        try:
             with db.transaction():
-                # 逐条插入以获取 ID（executemany 不返回 individual lastrowid）
                 ids = db.batch_insert_files_with_ids(batch_new)
 
-                # 填充 content 和 fts 的 file_id
                 content_records = []
                 fts_records = []
                 for idx, file_id in enumerate(ids):
                     # content
                     if idx < len(batch_content):
-                        content = batch_content[idx][1]  # (None, content)
+                        content = batch_content[idx][1]
                         if content:
                             content_records.append((file_id, content))
 
                     # fts
                     if idx < len(batch_fts):
                         fts_records.append((file_id, batch_fts[idx][1], batch_fts[idx][2]))
-                    else:
-                        # 新增文件还没有 fts 记录
-                        pass
 
                 if content_records:
                     db.batch_insert_contents(content_records)
@@ -328,37 +320,91 @@ class IndexerWorker(QObject):
                 pass
             return []
 
+    def _flush_update_batch(self, db, batch_update, batch_content,
+                            batch_fts_delete, batch_fts_insert):
+        """批量更新文件记录（单事务，避免逐条 delete_fts）"""
+        try:
+            with db.transaction():
+                # 1. 批量更新文件元数据
+                db.batch_update_files(batch_update)
+
+                # 2. 批量更新内容
+                if batch_content:
+                    db.batch_insert_contents(batch_content)
+
+                # 3. 批量删除旧 FTS（需要在事务中逐条执行，因为 contentless FTS5 需要匹配 token）
+                # 但我们在事务中执行，避免了每次 commit 的开销
+                if batch_fts_delete:
+                    # 获取需要删除的文件的旧 token 信息
+                    file_ids = [r[0] for r in batch_fts_delete]
+                    # 批量查询旧数据
+                    old_fts_data = db.get_fts_data_for_delete(file_ids)
+
+                    # 批量执行删除
+                    for rowid, old_filename, old_content in old_fts_data:
+                        db.conn.execute(
+                            "DELETE FROM files_fts WHERE rowid=? AND filename=? AND content=?",
+                            (rowid, old_filename, old_content)
+                        )
+
+                # 4. 批量插入新 FTS
+                if batch_fts_insert:
+                    db.batch_insert_fts(batch_fts_insert)
+
+        except Exception as e:
+            logger.error(f"批量更新失败: {e}")
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
     def _scan_files(self):
-        """扫描目录，返回所有匹配的文件路径
-        使用 os.scandir 替代 os.walk，在机械硬盘上快 3-5 倍
+        """扫描目录，返回文件信息字典
+        使用 os.scandir + 缓存 stat 结果（避免重复系统调用）
+        返回: {filepath: (rel_path, filename, ext, file_size, mtime)}
         """
-        files = []
+        file_infos = {}
         ext_set = set(e.lower() for e in self.file_types)
-        skip_dirs = {".", "$RECYCLE.BIN", "System Volume Information", "node_modules", ".git"}
+        skip_dirs = {"$RECYCLE.BIN", "System Volume Information", "node_modules", ".git"}
+        root = self.root_path
 
         def _scan_recursive(directory):
-            """递归扫描（使用 os.scandir）"""
+            """递归扫描（使用 os.scandir + stat 缓存）"""
             if self._cancelled:
                 return
             try:
                 with os.scandir(directory) as it:
                     for entry in it:
-                        if entry.is_dir(follow_symlinks=False):
-                            dirname = entry.name
-                            if dirname not in skip_dirs and not dirname.startswith("."):
-                                _scan_recursive(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            filename = entry.name
-                            ext = os.path.splitext(filename)[1].lower()
-                            if ext in ext_set:
-                                files.append(entry.path)
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                dirname = entry.name
+                                if dirname not in skip_dirs and not dirname.startswith("."):
+                                    _scan_recursive(entry.path)
+                            elif entry.is_file(follow_symlinks=False):
+                                filename = entry.name
+                                ext = os.path.splitext(filename)[1].lower()
+                                if ext in ext_set:
+                                    # 缓存 stat 结果（DirEntry 已缓存，直接用）
+                                    try:
+                                        stat = entry.stat()
+                                        file_size = stat.st_size
+                                        mtime = stat.st_mtime
+                                    except OSError:
+                                        continue
+                                    filepath = entry.path
+                                    rel_path = os.path.relpath(filepath, root)
+                                    file_infos[filepath] = (
+                                        rel_path, filename, ext, file_size, mtime
+                                    )
+                        except OSError:
+                            continue
             except PermissionError:
                 pass
             except OSError:
                 pass
 
-        _scan_recursive(self.root_path)
-        return files
+        _scan_recursive(root)
+        return file_infos
 
 
 class IndexerThread(QThread):
