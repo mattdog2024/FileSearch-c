@@ -300,6 +300,22 @@ class IndexDatabase:
         except sqlite3.OperationalError:
             pass
 
+    def get_fts_data_for_delete(self, file_ids):
+        """批量获取 FTS 删除所需的原始数据（单条查询替代 N*3 条查询）
+        返回: [(rowid, filename, content), ...]
+        """
+        if not file_ids:
+            return []
+        placeholders = ",".join("?" * len(file_ids))
+        rows = self.conn.execute(
+            f"""SELECT f.id, f.filename, COALESCE(fc.content, '')
+                FROM files f
+                LEFT JOIN file_contents fc ON fc.file_id = f.id
+                WHERE f.id IN ({placeholders})""",
+            file_ids
+        ).fetchall()
+        return rows
+
     def insert_content(self, file_id, content):
         """存储文件内容（用于离线预览）"""
         self.conn.execute(
