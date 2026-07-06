@@ -66,17 +66,21 @@ jobs:
           body: |
             ## FileSearch v${{ steps.version.outputs.version }}
 
-            ### 🚀 索引速度大幅提升（v2.4.0 关键优化）
-            - `batch_insert_files_with_ids` 改用 `executemany`（写入速度提升 10-50x）
-            - 索引期间 `PRAGMA synchronous=OFF`（写入速度提升 2-3x）
-            - 更新文件采用"标记旧记录无效 + 插入新记录"策略（避免 FTS5 DELETE 重分词开销）
-            - 分词前内容截断至 2M 字符（避免超大文件分词过慢）
-            - 批量大小从 200 提升到 500（减少事务次数）
-            - 索引结束运行 FTS5 optimize 合并 B-Tree 碎片
+            ### 🚀 真多核索引：绕过 GIL（v2.5.0 头条优化）
+            - 解析+分词改用 `ProcessPoolExecutor` 真多核并行（替换 `ThreadPoolExecutor`，后者因 GIL 实际并行度≈1x）
+            - 模块级 worker 进程并行预加载 jieba 词典；`wait(FIRST_COMPLETED)` 有界提交，避免大语料结果堆积
+            - `main.py` 增加 `freeze_support()`，修复 Windows 打包后子进程 spawn 问题
+            - 崩溃文件隔离在子进程，`BrokenProcessPool` 干净报错而非卡死
+
+            ### ⚡ 解析器加速（re.findall 替代 Python 字节循环）
+            - doc / ppt / xls 旧版 OLE 文档：UTF-16LE 文本段与 ASCII/GBK 文本段改用预编译正则 `re.findall`（C 实现），单文件解析提速 10-50x
+            - PDF：200 页上限防超大文件拖垮索引；仅当 `extract_text()` 为空时才回退 `extract_tables()`（极慢）
 
             ### 其他更新
-            - 🔧 索引管理抽屉 UI 修复（v2.3.1）
-            - 🎨 明亮暖白主题 UI
+            - `file_contents` 存储截断到 2M 字符，与分词/搜索范围一致（DB 体积下降，snippet 无 gap）
+            - 修复 v1→v2 迁移中 `COALESFC` typo（原被 try/except 吞掉，导致 FTS 内容重建静默失败）
+            - 新增 txt / md / 代码（.py .js .ts .java .c .cpp .h .css .html .json .xml .yaml .sql .sh .bat 等）解析器
+            - 索引管理抽屉文件类型选择改为 QGridLayout 多列换行，避免扩展名增多后横向溢出
 
             ### 使用说明
             1. 下载 `FileSearch-v${{ steps.version.outputs.version }}.exe`

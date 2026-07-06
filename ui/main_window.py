@@ -30,9 +30,10 @@ FILE_TYPE_COLORS = {
     'md': '#0891B2',
     'txt': '#64748B',
     'py': '#7C3AED', 'js': '#7C3AED', 'ts': '#7C3AED',
-    'java': '#7C3AED', 'c': '#7C3AED', 'cpp': '#7C3AED',
+    'java': '#7C3AED', 'c': '#7C3AED', 'cpp': '#7C3AED', 'h': '#7C3AED',
     'css': '#7C3AED', 'html': '#DB2777', 'htm': '#DB2777',
     'json': '#B45309', 'xml': '#B45309', 'yaml': '#B45309',
+    'sql': '#7C3AED', 'sh': '#7C3AED', 'bat': '#7C3AED',
 }
 
 # 类型分类映射
@@ -40,7 +41,7 @@ TYPE_CATEGORY_MAP = {
     'doc': ['.doc', '.docx', '.md', '.rtf', '.epub'],
     'sheet': ['.xls', '.xlsx', '.csv'],
     'pdf': ['.pdf'],
-    'code': ['.py', '.js', '.ts', '.java', '.c', '.cpp', '.css',
+    'code': ['.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.css',
              '.html', '.htm', '.json', '.xml', '.yaml', '.ini',
              '.cfg', '.sql', '.bat', '.sh', '.ps1'],
     'text': ['.txt', '.log'],

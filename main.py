@@ -44,7 +44,7 @@ def main():
 
     # 设置应用信息
     app.setApplicationName("FileSearch")
-    app.setApplicationVersion("2.4.0")
+    app.setApplicationVersion("2.5.0")
     app.setOrganizationName("FileSearch")
 
     # 设置明亮暖白主题样式
@@ -461,4 +461,9 @@ def get_stylesheet():
 
 
 if __name__ == "__main__":
+    # ProcessPoolExecutor 在 Windows 打包后用 spawn 模式启动子进程：
+    # 子进程会重新执行 frozen 入口脚本。freeze_support 必须是 __main__ 第一行，
+    # 否则子进程会再次走到 main() → 创建第二个 QApplication → 崩溃/卡死。
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

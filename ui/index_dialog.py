@@ -5,7 +5,7 @@ import os
 import sys
 import time
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QCheckBox, QProgressBar, QTextEdit,
     QComboBox, QMessageBox, QFrame, QGraphicsDropShadowEffect,
     QScrollArea, QSizePolicy
@@ -339,14 +339,17 @@ class IndexDialog(QWidget):
         """)
         form_layout.addWidget(type_label)
 
-        type_grid = QHBoxLayout()
+        # 用 QGridLayout 多列换行布局：扩展名已达 ~26 个，QHBoxLayout 会横向溢出
+        # 520px 抽屉。每行 8 列，标签按 minWidth 自然宽度左对齐，列拉伸为 0 避免被均分拉宽。
+        type_grid = QGridLayout()
         type_grid.setSpacing(6)
+        type_grid.setContentsMargins(0, 0, 0, 0)
         self.type_checks = {}
-        for ext in get_supported_extensions():
+        cols = 8
+        for idx, ext in enumerate(get_supported_extensions()):
             tc = TypeCheckLabel(ext)
             self.type_checks[ext] = tc
-            type_grid.addWidget(tc)
-        type_grid.addStretch()
+            type_grid.addWidget(tc, idx // cols, idx % cols)
         form_layout.addLayout(type_grid)
 
         # 增量索引选项

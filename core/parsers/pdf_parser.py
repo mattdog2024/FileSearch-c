@@ -41,7 +41,8 @@ def _parse_with_pypdf2(filepath):
     reader = PdfReader(filepath)
     text_parts = []
 
-    for page in reader.pages:
+    # 200 页上限：防超大 PDF 拖垮索引（worker 存储已截断到 2M，超出页无搜索价值）
+    for page in reader.pages[:200]:
         try:
             page_text = page.extract_text()
             if page_text:
@@ -58,13 +59,15 @@ def _parse_with_pdfplumber(filepath):
 
     text_parts = []
     with pdfplumber.open(filepath) as pdf:
-        for i, page in enumerate(pdf.pages):
+        # 200 页上限同 PyPDF2，保持两路一致，防超大 PDF 双倍拖累
+        for i, page in enumerate(pdf.pages[:200]):
             try:
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)
-
-                # 也提取表格
+                    continue
+                # 仅当正文提取为空时才回退到表格提取（extract_tables 极慢，
+                # 每页都跑会让 pdfplumber 慢一个数量级）
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:

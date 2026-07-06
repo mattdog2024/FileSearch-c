@@ -174,7 +174,7 @@ class IndexDatabase:
                     # 重新填充 FTS 索引
                     self.conn.execute("""
                         INSERT INTO files_fts (rowid, filename, content)
-                        SELECT f.id, f.filename, COALESFC(fc.content, '')
+                        SELECT f.id, f.filename, COALESCE(fc.content, '')
                         FROM files f
                         LEFT JOIN file_contents fc ON fc.file_id = f.id
                         WHERE f.is_valid = 1

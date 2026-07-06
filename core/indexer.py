@@ -1,34 +1,37 @@
-"""索引引擎 - 扫描文件、解析内容、构建索引（极速版 v3）
+"""索引引擎 - 扫描文件、解析内容、构建索引（v2.5.0 真多核版）
 优化：
 - os.scandir + stat 缓存（避免重复系统调用）
-- jieba 分词移入 worker 线程（主线程不再阻塞）
-- 自适应线程数
+- ProcessPoolExecutor 真多核并行（绕过 GIL，解析+分词不再被线程锁串行化）
+- worker 进程预加载 jieba 词典（initializer 并行加载 + 词典缺失 fail-fast）
+- wait(FIRST_COMPLETED) + inflight_cap 有界提交（避免大语料 pickled 结果堆积内存）
+- 自适应进程数
 - 单事务批量写入
 - contentless FTS5 + 独立内容存储
 - 索引期间 PRAGMA synchronous=OFF（写入速度提升 2-3x）
 - 批量 executemany（避免逐条 INSERT）
 - 更新文件采用"标记旧记录无效 + 插入新记录"策略（避免 contentless FTS5 DELETE 重分词开销）
-- 分词前内容截断（避免超大文件分词过慢）
+- 分词前内容截断（存储范围 == 搜索范围 == snippet 范围，无 gap）
 - 索引结束 FTS5 optimize 合并碎片
 """
 import os
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures.process import BrokenProcessPool
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
 from .database import IndexDatabase
-from .text_utils import clean_text, tokenize_filename, tokenize_content, MAX_CONTENT_CHARS
-from .parsers import parse_file, get_supported_extensions
+from .index_worker import parse_and_tokenize, _init_worker
+from .parsers import get_supported_extensions
 
 logger = logging.getLogger(__name__)
 
 # 单个文件最大大小 (50MB)
 MAX_FILE_SIZE = 50 * 1024 * 1024
 
-# 自适应线程数
+# 自适应进程数
 def _get_optimal_workers():
-    """根据 CPU 核心数确定最佳线程数"""
+    """根据 CPU 核心数确定最佳进程数"""
     try:
         cpu_count = os.cpu_count() or 2
     except Exception:
@@ -137,12 +140,13 @@ class IndexerWorker(QObject):
         if self.is_incremental and not is_new:
             existing_files = db.get_all_indexed_files_dict()
 
-        # 阶段2: 解析文件内容 + 分词（全部在 worker 线程完成）
+        # 阶段2: 解析文件内容 + 分词（在进程池 worker 中完成，绕过 GIL 真多核）
         self.phase_changed.emit("parsing")
         new_count = 0
         updated_count = 0
         skipped_count = 0
         error_count = 0
+        processed_count = 0  # 进程崩溃日志用到，预先定义避免 NameError
 
         # 批量写入缓冲（合并 new + update 的插入操作）
         batch_new = []           # [(rel_path, filename, ext, size, mtime, index_time)]
@@ -152,145 +156,208 @@ class IndexerWorker(QObject):
         # 增大批量：单事务更多数据，减少事务开销
         batch_size = 500
 
-        # 使用线程池并行解析 + 分词
-        workers = min(MAX_WORKERS, max(1, total // 10))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            # 提交所有任务
-            future_to_file = {}
-            for i, (filepath, info) in enumerate(file_infos.items()):
-                if self._cancelled:
-                    break
+        # 使用进程池并行解析 + 分词（绕过 GIL，真多核）
+        # 去掉 total//10 退化：进程模式下小文件集也该并行
+        workers = min(MAX_WORKERS, max(1, total))
+        # 有界提交：限制在途 future 数，避免大语料 GB 级 pickled 结果堆积内存
+        # （每个 worker 结果最多 ~2M 内容 + tokens，cap=workers*2 → 峰值 ~32-48MB）
+        inflight_cap = max(workers * 2, 4)
 
-                rel_path, filename, ext, file_size, mtime = info
-
-                # 检查是否需要跳过（增量索引：mtime+size 未变）
-                if rel_path in existing_files:
-                    old_id, old_size, old_mtime = existing_files[rel_path]
-                    if old_size == file_size and abs(old_mtime - mtime) < 1:
-                        skipped_count += 1
-                        del existing_files[rel_path]
-                        continue
-
-                # 检查文件大小
-                if file_size > MAX_FILE_SIZE:
-                    self.log_message.emit(f"跳过大文件 ({file_size // 1024 // 1024}MB): {filename}")
-                    skipped_count += 1
-                    continue
-
-                # 提交解析+分词任务（全部在 worker 线程完成）
-                future = executor.submit(
-                    self._parse_and_tokenize, filepath, ext, filename
+        broken = False  # BrokenProcessPool 标志：触发后跳过 optimize_fts
+        pool = None
+        future_to_file = {}
+        try:
+            try:
+                pool = ProcessPoolExecutor(
+                    max_workers=workers,
+                    initializer=_init_worker,
                 )
-                future_to_file[future] = (i, filepath, rel_path, filename, ext, file_size, mtime)
 
-            # 处理完成的任务
-            processed_count = 0
-            for future in as_completed(future_to_file):
-                if self._cancelled:
-                    break
+                file_iter = iter(file_infos.items())
+                exhausted = False
 
-                i, filepath, rel_path, filename, ext, file_size, mtime = future_to_file[future]
-                processed_count += 1
+                def refill():
+                    """按需补充提交，维持在途 future 数 <= inflight_cap。"""
+                    nonlocal exhausted, skipped_count
+                    while (
+                        not exhausted
+                        and not self._cancelled
+                        and len(future_to_file) < inflight_cap
+                    ):
+                        try:
+                            filepath, info = next(file_iter)
+                        except StopIteration:
+                            exhausted = True
+                            return
+                        rel_path, filename, ext, file_size, mtime = info
 
-                try:
-                    # result 现在包含 (content, filename_tokens, content_tokens)
-                    content, filename_tokens, content_tokens = future.result()
-                except Exception as e:
-                    error_count += 1
-                    logger.debug(f"解析失败 {filename}: {e}")
-                    content, filename_tokens, content_tokens = "", "", ""
+                        # 增量索引：mtime+size 未变则跳过
+                        if rel_path in existing_files:
+                            old_id, old_size, old_mtime = existing_files[rel_path]
+                            if old_size == file_size and abs(old_mtime - mtime) < 1:
+                                skipped_count += 1
+                                del existing_files[rel_path]
+                                continue
 
-                now = time.time()
+                        # 检查文件大小
+                        if file_size > MAX_FILE_SIZE:
+                            self.log_message.emit(
+                                f"跳过大文件 ({file_size // 1024 // 1024}MB): {filename}"
+                            )
+                            skipped_count += 1
+                            continue
 
-                # 检查是否已存在（更新）：采用 "标记旧记录无效 + 插入新记录" 策略
-                # 避免 contentless FTS5 删除时需要重新分词的昂贵开销
-                if rel_path in existing_files:
-                    old_id, old_size, old_mtime = existing_files[rel_path]
-                    batch_mark_invalid.append(old_id)
-                    del existing_files[rel_path]
-                    updated_count += 1
-                else:
-                    new_count += 1  # 仅统计意义上的"新文件"
+                        future = pool.submit(parse_and_tokenize, filepath, ext, filename)
+                        future_to_file[future] = (rel_path, filename, ext, file_size, mtime)
 
-                # 统一作为"新记录"插入（外加标记旧记录无效）
-                batch_new.append((rel_path, filename, ext, file_size, mtime, now))
-                batch_content.append((None, content))
-                batch_fts.append((None, filename_tokens, content_tokens))
+                refill()
 
-                if len(batch_new) >= batch_size:
+                # wait(FIRST_COMPLETED) + 短 timeout：既能在有结果时立即处理，
+                # 又能定期回到 while 条件检查 self._cancelled，保证取消响应性
+                while future_to_file and not self._cancelled:
+                    done, _ = wait(
+                        fs=list(future_to_file.keys()),
+                        timeout=0.2,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not done:
+                        continue  # timeout：回到 while 重新检查 _cancelled
+                    for future in done:
+                        meta = future_to_file.pop(future)
+                        rel_path, filename, ext, file_size, mtime = meta
+                        processed_count += 1
+
+                        try:
+                            # worker 返回 (stored_content, filename_tokens, content_tokens)
+                            content, filename_tokens, content_tokens = future.result()
+                        except BrokenProcessPool as e:
+                            # 子进程原生库（pdfplumber/PyPDF2/python-docx）segfault
+                            # → 进程池标记为 broken，后续 submit/result 全部抛此异常
+                            self.error.emit(
+                                f"索引进程崩溃（可能损坏的文件触发原生库崩溃）: {e}"
+                            )
+                            logger.error("BrokenProcessPool during indexing", exc_info=True)
+                            broken = True
+                            break
+                        except Exception as e:
+                            error_count += 1
+                            logger.debug(f"解析失败 {filename}: {e}")
+                            content, filename_tokens, content_tokens = "", "", ""
+
+                        now = time.time()
+
+                        # 检查是否已存在（更新）：采用 "标记旧记录无效 + 插入新记录" 策略
+                        # 避免 contentless FTS5 删除时需要重新分词的昂贵开销
+                        if rel_path in existing_files:
+                            old_id, old_size, old_mtime = existing_files[rel_path]
+                            batch_mark_invalid.append(old_id)
+                            del existing_files[rel_path]
+                            updated_count += 1
+                        else:
+                            new_count += 1  # 仅统计意义上的"新文件"
+
+                        # 统一作为"新记录"插入（外加标记旧记录无效）
+                        batch_new.append((rel_path, filename, ext, file_size, mtime, now))
+                        batch_content.append((None, content))
+                        batch_fts.append((None, filename_tokens, content_tokens))
+
+                        if len(batch_new) >= batch_size:
+                            self._flush_batch(db, batch_new, batch_content, batch_fts, batch_mark_invalid)
+                            batch_new = []
+                            batch_content = []
+                            batch_fts = []
+                            batch_mark_invalid = []
+
+                        # 节流进度更新
+                        if now - self._last_progress_time > 0.2:
+                            self.progress.emit(processed_count + skipped_count, total, filename)
+                            self._last_progress_time = now
+
+                        # 每200个文件显示一次详细进度
+                        if processed_count % 200 == 0:
+                            elapsed = time.time() - self._start_time
+                            processed = new_count + updated_count + skipped_count
+                            if processed > 0:
+                                avg_time = elapsed / processed
+                                remaining = (total - processed) * avg_time
+                                eta_str = self._format_eta(remaining)
+                                self.log_message.emit(
+                                    f"进度: {processed_count + skipped_count}/{total} | "
+                                    f"新增: {new_count} | 更新: {updated_count} | "
+                                    f"跳过: {skipped_count} | 预计剩余: {eta_str}"
+                                )
+
+                    if broken:
+                        break
+                    # 补充提交，维持 inflight 水位
+                    refill()
+
+                # 刷新剩余批次
+                if batch_new:
                     self._flush_batch(db, batch_new, batch_content, batch_fts, batch_mark_invalid)
-                    batch_new = []
-                    batch_content = []
-                    batch_fts = []
-                    batch_mark_invalid = []
 
-                # 节流进度更新
-                now_time = time.time()
-                if now_time - self._last_progress_time > 0.2:
-                    self.progress.emit(processed_count + skipped_count, total, filename)
-                    self._last_progress_time = now_time
+                # 标记不再存在的文件为无效（已删除的文件）
+                if self.is_incremental and existing_files:
+                    invalid_ids = [v[0] for v in existing_files.values()]
+                    if invalid_ids:
+                        db.batch_mark_invalid(invalid_ids)
 
-                # 每200个文件显示一次详细进度
-                if processed_count % 200 == 0:
-                    elapsed = time.time() - self._start_time
-                    processed = new_count + updated_count + skipped_count
-                    if processed > 0:
-                        avg_time = elapsed / processed
-                        remaining = (total - processed) * avg_time
-                        eta_str = self._format_eta(remaining)
-                        self.log_message.emit(
-                            f"进度: {processed_count + skipped_count}/{total} | "
-                            f"新增: {new_count} | 更新: {updated_count} | "
-                            f"跳过: {skipped_count} | 预计剩余: {eta_str}"
-                        )
+                # ---- FTS5 索引优化：合并 B-Tree 碎片，提升搜索性能 ----
+                # 取消 / 进程崩溃时跳过（optimize 对不完整索引意义不大，且耗时）
+                if not self._cancelled and not broken:
+                    self.log_message.emit("正在优化 FTS 索引...")
+                    db.optimize_fts()
 
-        # 刷新剩余批次
-        if batch_new:
-            self._flush_batch(db, batch_new, batch_content, batch_fts, batch_mark_invalid)
-
-        # 标记不再存在的文件为无效（已删除的文件）
-        if self.is_incremental and existing_files:
-            invalid_ids = [v[0] for v in existing_files.values()]
-            if invalid_ids:
-                db.batch_mark_invalid(invalid_ids)
-
-        # ---- FTS5 索引优化：合并 B-Tree 碎片，提升搜索性能 ----
-        self.log_message.emit("正在优化 FTS 索引...")
-        db.optimize_fts()
-
-        # 恢复 synchronous=NORMAL
-        db.toggle_synchronous(fast_mode=False)
-
-        # 更新元数据
-        db.set_last_index_time()
-
-        db.close()
+                # 更新元数据
+                db.set_last_index_time()
+            except BrokenProcessPool as e:
+                # 进程池在 submit/refill 阶段就 broken（如 initializer 中 jieba 词典缺失）
+                self.error.emit(
+                    f"索引进程崩溃（可能 jieba 词典缺失或原生库崩溃）: {e}"
+                )
+                logger.error("BrokenProcessPool during indexing", exc_info=True)
+                broken = True
+        finally:
+            # 取消 pending future（对已 running 的无效）；清理在途映射
+            for f in list(future_to_file.keys()):
+                f.cancel()
+            future_to_file.clear()
+            if pool is not None:
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    # Python < 3.9 无 cancel_futures 参数
+                    pool.shutdown(wait=False)
+            # 确保 DB 总是恢复安全模式并关闭（即使取消/崩溃/异常，避免残留 fast-mode）
+            try:
+                db.toggle_synchronous(fast_mode=False)
+            except Exception:
+                pass
+            try:
+                db.close()
+            except Exception:
+                pass
 
         elapsed = time.time() - self._start_time
-        self.log_message.emit(
-            f"索引完成! 总计: {total} | 新增: {new_count} | 更新: {updated_count} | "
-            f"跳过: {skipped_count} | 错误: {error_count} | 耗时: {self._format_eta(elapsed)}"
-        )
-        self.phase_changed.emit("done")
-        self.finished.emit(total, new_count, updated_count)
-
-    def _parse_and_tokenize(self, filepath, ext, filename):
-        """解析单个文件 + 分词（在 worker 线程中执行）
-        返回: (content, filename_tokens, content_tokens)
-        """
-        try:
-            # parse_file 返回 (text, error_msg) 元组
-            content, _ = parse_file(filepath, ext)
-            content = clean_text(content)
-        except Exception as e:
-            logger.debug(f"解析失败 {filename}: {e}")
-            content = ""
-
-        # 分词也在 worker 线程完成，不阻塞主线程
-        filename_tokens = tokenize_filename(filename)
-        content_tokens = tokenize_content(content) if content else ""
-
-        return content, filename_tokens, content_tokens
+        if broken:
+            # 进程崩溃：error 已 emit，这里只记日志，不 emit finished（避免误导用户"完成"）
+            self.log_message.emit(
+                f"索引因进程崩溃中止 | 已处理: {processed_count} | 耗时: {self._format_eta(elapsed)}"
+            )
+        elif self._cancelled:
+            self.log_message.emit(
+                f"索引已取消 | 新增: {new_count} | 更新: {updated_count} | "
+                f"跳过: {skipped_count} | 耗时: {self._format_eta(elapsed)}"
+            )
+            self.phase_changed.emit("done")
+            self.finished.emit(total, new_count, updated_count)
+        else:
+            self.log_message.emit(
+                f"索引完成! 总计: {total} | 新增: {new_count} | 更新: {updated_count} | "
+                f"跳过: {skipped_count} | 错误: {error_count} | 耗时: {self._format_eta(elapsed)}"
+            )
+            self.phase_changed.emit("done")
+            self.finished.emit(total, new_count, updated_count)
 
     def _flush_batch(self, db, batch_new, batch_content, batch_fts, batch_mark_invalid=None):
         """批量写入文件记录（单事务）
