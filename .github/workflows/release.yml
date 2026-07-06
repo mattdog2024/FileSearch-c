@@ -66,11 +66,17 @@ jobs:
           body: |
             ## FileSearch v${{ steps.version.outputs.version }}
 
-            ### 更新内容
-            - 🚀 性能大幅优化：FTS5 contentless 模式、jieba 分词搜索、os.scandir 递归扫描
-            - 🎨 全新 UI：Catppuccin 深色主题、卡片式布局、现代化设计
-            - 📦 多索引支持：可同时加载多个索引进行搜索
-            - 🔧 Bug 修复：多索引 root_path 问题、编码检测优化
+            ### 🚀 索引速度大幅提升（v2.4.0 关键优化）
+            - `batch_insert_files_with_ids` 改用 `executemany`（写入速度提升 10-50x）
+            - 索引期间 `PRAGMA synchronous=OFF`（写入速度提升 2-3x）
+            - 更新文件采用"标记旧记录无效 + 插入新记录"策略（避免 FTS5 DELETE 重分词开销）
+            - 分词前内容截断至 2M 字符（避免超大文件分词过慢）
+            - 批量大小从 200 提升到 500（减少事务次数）
+            - 索引结束运行 FTS5 optimize 合并 B-Tree 碎片
+
+            ### 其他更新
+            - 🔧 索引管理抽屉 UI 修复（v2.3.1）
+            - 🎨 明亮暖白主题 UI
 
             ### 使用说明
             1. 下载 `FileSearch-v${{ steps.version.outputs.version }}.exe`

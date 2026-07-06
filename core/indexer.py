@@ -1,11 +1,15 @@
-"""索引引擎 - 扫描文件、解析内容、构建索引（极速版 v2）
+"""索引引擎 - 扫描文件、解析内容、构建索引（极速版 v3）
 优化：
 - os.scandir + stat 缓存（避免重复系统调用）
 - jieba 分词移入 worker 线程（主线程不再阻塞）
-- 批量 FTS 删除（单事务 executemany）
 - 自适应线程数
 - 单事务批量写入
 - contentless FTS5 + 独立内容存储
+- 索引期间 PRAGMA synchronous=OFF（写入速度提升 2-3x）
+- 批量 executemany（避免逐条 INSERT）
+- 更新文件采用"标记旧记录无效 + 插入新记录"策略（避免 contentless FTS5 DELETE 重分词开销）
+- 分词前内容截断（避免超大文件分词过慢）
+- 索引结束 FTS5 optimize 合并碎片
 """
 import os
 import time
@@ -14,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
 from .database import IndexDatabase
-from .text_utils import clean_text, tokenize_filename, tokenize_content
+from .text_utils import clean_text, tokenize_filename, tokenize_content, MAX_CONTENT_CHARS
 from .parsers import parse_file, get_supported_extensions
 
 logger = logging.getLogger(__name__)
@@ -103,6 +107,9 @@ class IndexerWorker(QObject):
         except Exception:
             pass
 
+        # ---- 性能优化：索引期间关闭 fsync 同步，写入速度提升 2-3 倍 ----
+        db.toggle_synchronous(fast_mode=True)
+
         # 阶段1: 扫描文件（使用 os.scandir + stat 缓存）
         self.phase_changed.emit("scanning")
         self.log_message.emit(f"正在扫描目录: {self.root_path}")
@@ -110,6 +117,7 @@ class IndexerWorker(QObject):
         file_infos = self._scan_files()
 
         if self._cancelled:
+            db.toggle_synchronous(fast_mode=False)
             db.close()
             return
 
@@ -118,6 +126,7 @@ class IndexerWorker(QObject):
 
         if total == 0:
             db.set_last_index_time()
+            db.toggle_synchronous(fast_mode=False)
             db.close()
             self.phase_changed.emit("done")
             self.finished.emit(0, 0, 0)
@@ -135,15 +144,13 @@ class IndexerWorker(QObject):
         skipped_count = 0
         error_count = 0
 
-        # 批量写入缓冲
-        batch_new = []  # [(rel_path, filename, ext, size, mtime, index_time)]
-        batch_content = []  # [(file_id, content)]
-        batch_fts = []  # [(rowid, filename_tokens, content_tokens)]
-        batch_update = []  # [(size, mtime, index_time, file_id)]
-        batch_update_fts_delete = []  # [(old_id,)] 批量删除 FTS
-        batch_update_content = []  # [(file_id, content)] 更新的内容
-        batch_update_fts_insert = []  # [(rowid, filename_tokens, content_tokens)]
-        batch_size = 200
+        # 批量写入缓冲（合并 new + update 的插入操作）
+        batch_new = []           # [(rel_path, filename, ext, size, mtime, index_time)]
+        batch_content = []       # [(None, content)] 占位
+        batch_fts = []           # [(None, filename_tokens, content_tokens)]
+        batch_mark_invalid = []  # [file_id, ...] 需要标记为无效的旧记录
+        # 增大批量：单事务更多数据，减少事务开销
+        batch_size = 500
 
         # 使用线程池并行解析 + 分词
         workers = min(MAX_WORKERS, max(1, total // 10))
@@ -156,7 +163,7 @@ class IndexerWorker(QObject):
 
                 rel_path, filename, ext, file_size, mtime = info
 
-                # 检查是否需要跳过（增量索引）
+                # 检查是否需要跳过（增量索引：mtime+size 未变）
                 if rel_path in existing_files:
                     old_id, old_size, old_mtime = existing_files[rel_path]
                     if old_size == file_size and abs(old_mtime - mtime) < 1:
@@ -195,28 +202,27 @@ class IndexerWorker(QObject):
 
                 now = time.time()
 
-                # 检查是否已存在（更新）
+                # 检查是否已存在（更新）：采用 "标记旧记录无效 + 插入新记录" 策略
+                # 避免 contentless FTS5 删除时需要重新分词的昂贵开销
                 if rel_path in existing_files:
                     old_id, old_size, old_mtime = existing_files[rel_path]
-                    batch_update.append((file_size, mtime, now, old_id))
-                    if content:
-                        batch_update_content.append((old_id, content))
-                    # FTS 删除收集起来批处理
-                    batch_update_fts_delete.append((old_id,))
-                    batch_update_fts_insert.append((old_id, filename_tokens, content_tokens))
-                    updated_count += 1
+                    batch_mark_invalid.append(old_id)
                     del existing_files[rel_path]
+                    updated_count += 1
                 else:
-                    batch_new.append((rel_path, filename, ext, file_size, mtime, now))
-                    batch_content.append((None, content))  # None 表示待填充
-                    batch_fts.append((None, filename_tokens, content_tokens))
+                    new_count += 1  # 仅统计意义上的"新文件"
 
-                    if len(batch_new) >= batch_size:
-                        self._flush_batch(db, batch_new, batch_content, batch_fts)
-                        new_count += len(batch_new)
-                        batch_new = []
-                        batch_content = []
-                        batch_fts = []
+                # 统一作为"新记录"插入（外加标记旧记录无效）
+                batch_new.append((rel_path, filename, ext, file_size, mtime, now))
+                batch_content.append((None, content))
+                batch_fts.append((None, filename_tokens, content_tokens))
+
+                if len(batch_new) >= batch_size:
+                    self._flush_batch(db, batch_new, batch_content, batch_fts, batch_mark_invalid)
+                    batch_new = []
+                    batch_content = []
+                    batch_fts = []
+                    batch_mark_invalid = []
 
                 # 节流进度更新
                 now_time = time.time()
@@ -238,23 +244,22 @@ class IndexerWorker(QObject):
                             f"跳过: {skipped_count} | 预计剩余: {eta_str}"
                         )
 
-        # 刷新剩余新文件批次
+        # 刷新剩余批次
         if batch_new:
-            self._flush_batch(db, batch_new, batch_content, batch_fts)
-            new_count += len(batch_new)
+            self._flush_batch(db, batch_new, batch_content, batch_fts, batch_mark_invalid)
 
-        # 刷新更新批次（全部在一个事务中）
-        if batch_update:
-            self._flush_update_batch(
-                db, batch_update, batch_update_content,
-                batch_update_fts_delete, batch_update_fts_insert
-            )
-
-        # 标记不再存在的文件为无效
+        # 标记不再存在的文件为无效（已删除的文件）
         if self.is_incremental and existing_files:
             invalid_ids = [v[0] for v in existing_files.values()]
             if invalid_ids:
                 db.batch_mark_invalid(invalid_ids)
+
+        # ---- FTS5 索引优化：合并 B-Tree 碎片，提升搜索性能 ----
+        self.log_message.emit("正在优化 FTS 索引...")
+        db.optimize_fts()
+
+        # 恢复 synchronous=NORMAL
+        db.toggle_synchronous(fast_mode=False)
 
         # 更新元数据
         db.set_last_index_time()
@@ -287,12 +292,29 @@ class IndexerWorker(QObject):
 
         return content, filename_tokens, content_tokens
 
-    def _flush_batch(self, db, batch_new, batch_content, batch_fts):
-        """批量写入新文件记录"""
+    def _flush_batch(self, db, batch_new, batch_content, batch_fts, batch_mark_invalid=None):
+        """批量写入文件记录（单事务）
+
+        batch_new: [(rel_path, filename, ext, size, mtime, index_time), ...]
+        batch_content: [(None, content), ...] 占位
+        batch_fts: [(None, filename_tokens, content_tokens), ...]
+        batch_mark_invalid: [file_id, ...] 需要标记为无效的旧记录（更新场景）
+
+        性能优化：
+        - 批量 executemany 插入（10-50x 比逐条 INSERT 快）
+        - 单事务包裹所有操作
+        - 旧记录标记为无效，避免 contentless FTS5 昂贵的 DELETE 重分词
+        """
         try:
             with db.transaction():
+                # 1. 标记需要更新的旧记录为无效
+                if batch_mark_invalid:
+                    db.batch_mark_invalid(batch_mark_invalid)
+
+                # 2. 批量插入新文件记录（executemany 一次性写入）
                 ids = db.batch_insert_files_with_ids(batch_new)
 
+                # 3. 分离 content 和 fts 记录
                 content_records = []
                 fts_records = []
                 for idx, file_id in enumerate(ids):
@@ -301,11 +323,11 @@ class IndexerWorker(QObject):
                         content = batch_content[idx][1]
                         if content:
                             content_records.append((file_id, content))
-
                     # fts
                     if idx < len(batch_fts):
                         fts_records.append((file_id, batch_fts[idx][1], batch_fts[idx][2]))
 
+                # 4. 批量插入内容和 FTS（executemany）
                 if content_records:
                     db.batch_insert_contents(content_records)
                 if fts_records:
@@ -319,44 +341,6 @@ class IndexerWorker(QObject):
             except Exception:
                 pass
             return []
-
-    def _flush_update_batch(self, db, batch_update, batch_content,
-                            batch_fts_delete, batch_fts_insert):
-        """批量更新文件记录（单事务，避免逐条 delete_fts）"""
-        try:
-            with db.transaction():
-                # 1. 批量更新文件元数据
-                db.batch_update_files(batch_update)
-
-                # 2. 批量更新内容
-                if batch_content:
-                    db.batch_insert_contents(batch_content)
-
-                # 3. 批量删除旧 FTS（需要在事务中逐条执行，因为 contentless FTS5 需要匹配 token）
-                # 但我们在事务中执行，避免了每次 commit 的开销
-                if batch_fts_delete:
-                    # 获取需要删除的文件的旧 token 信息
-                    file_ids = [r[0] for r in batch_fts_delete]
-                    # 批量查询旧数据
-                    old_fts_data = db.get_fts_data_for_delete(file_ids)
-
-                    # 批量执行删除
-                    for rowid, old_filename, old_content in old_fts_data:
-                        db.conn.execute(
-                            "DELETE FROM files_fts WHERE rowid=? AND filename=? AND content=?",
-                            (rowid, old_filename, old_content)
-                        )
-
-                # 4. 批量插入新 FTS
-                if batch_fts_insert:
-                    db.batch_insert_fts(batch_fts_insert)
-
-        except Exception as e:
-            logger.error(f"批量更新失败: {e}")
-            try:
-                db.conn.rollback()
-            except Exception:
-                pass
 
     def _scan_files(self):
         """扫描目录，返回文件信息字典

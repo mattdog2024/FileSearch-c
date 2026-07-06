@@ -9,6 +9,9 @@ import os
 _jieba = None
 _jieba_loaded = False
 
+# 分词前最大内容字符数（超过则截断，避免超大文件分词过慢）
+MAX_CONTENT_CHARS = 2_000_000  # 约2MB文本
+
 
 def get_jieba():
     """获取jieba分词器（延迟加载）"""
@@ -88,10 +91,15 @@ def tokenize_content(text):
     - 中文用 jieba 分词
     - 英文保留原词
     - 返回空格分隔的 token 字符串
-    性能优化：使用 cut() 替代 cut_for_search()，速度快 3-5 倍
+    性能优化：
+    - 使用 cut() 替代 cut_for_search()，速度快 3-5 倍
+    - 超长文本截断后再分词，避免大文件分词耗时过长
     """
     if not text:
         return ""
+    # 截断超长文本（FTS 索引不需要全文分词，前 2M 字符足够）
+    if len(text) > MAX_CONTENT_CHARS:
+        text = text[:MAX_CONTENT_CHARS]
     jieba = get_jieba()
     # cut() 比 cut_for_search() 快 3-5 倍，对于索引场景足够
     words = jieba.cut(text, HMM=False)
